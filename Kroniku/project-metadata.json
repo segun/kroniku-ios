@@ -1,0 +1,14 @@
+{
+  "name": "Kroniku-iOS",
+  "description": "iOS frontend for Kroniku - contact moment capture app.",
+  "root": ".",
+  "xcode_project": "Kroniku.xcodeproj",
+  "entry_swift_file": "KronikuApp.swift",
+  "platforms": ["iOS"],
+  "min_ios_version": "16.0",
+  "swift_version": "5.x",
+  "license": "MIT",
+  "author": "aardvocate",
+  "created_at": "2026-07-23",
+  "notes": "iOS-specific metadata for tooling. Update bundle identifier, team, and CI hints as needed."
+}
