@@ -1,9 +1,16 @@
 import SwiftUI
+import SwiftData
 
 struct TimelineView: View {
     @Binding var showsCapture: Bool
 
-    private let events = TimelineEvent.preview
+    @Environment(\.modelContext) private var modelContext
+    @State private var events: [MemoryEvent] = []
+
+    private func loadEvents() {
+        let repo = SwiftDataMemoryRepository(modelContext: modelContext)
+        events = repo.fetchAll()
+    }
 
     var body: some View {
         NavigationStack {
@@ -16,7 +23,9 @@ struct TimelineView: View {
 
                     LazyVStack(spacing: 0) {
                         ForEach(events) { event in
-                            TimelineRow(event: event)
+                            NavigationLink(destination: ContactMomentDetailView(event: event)) {
+                                TimelineRow(event: event)
+                            }
                         }
                     }
                     .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -35,11 +44,13 @@ struct TimelineView: View {
                 }
             }
         }
+        .onAppear { loadEvents() }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in loadEvents() }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Thursday, July 23")
+            Text(Date(), format: .dateTime.weekday().month().day())
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text("A day worth remembering.")
@@ -64,36 +75,53 @@ struct TimelineView: View {
 }
 
 private struct TimelineRow: View {
-    let event: TimelineEvent
+    let event: MemoryEvent
+
+    private func color(for name: String?) -> Color {
+        switch name {
+        case "indigo": return .indigo
+        case "orange": return .orange
+        case "pink": return .pink
+        case "red": return .red
+        default: return .gray
+        }
+    }
+
+    private var timeText: String {
+        if let date = event.occurredAt {
+            return date.formatted(.dateTime.hour().minute())
+        }
+        return "--:--"
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
-            Text(event.time)
+            Text(timeText)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
+                .frame(width: 64, alignment: .leading)
 
             VStack(spacing: 0) {
-                Image(systemName: event.symbol)
+                Image(systemName: event.symbolName ?? "circle.fill")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(event.color)
+                    .foregroundStyle(color(for: event.colorName))
                     .frame(width: 32, height: 32)
-                    .background(event.color.opacity(0.12), in: Circle())
-                if event.id != TimelineEvent.preview.last?.id {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.16))
-                        .frame(width: 1)
-                        .frame(maxHeight: .infinity)
-                }
+                    .background(color(for: event.colorName).opacity(0.12), in: Circle())
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.16))
+                    .frame(width: 1)
+                    .frame(maxHeight: .infinity)
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(event.title).font(.body.weight(.semibold))
-                Text(event.detail).font(.subheadline).foregroundStyle(.secondary)
+                Text(event.title ?? "Untitled").font(.body.weight(.semibold))
+                if let detail = event.detail {
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                }
                 if let context = event.context {
                     Text(context)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(event.color)
+                        .foregroundStyle(.secondary)
                         .padding(.top, 2)
                 }
             }
@@ -101,21 +129,4 @@ private struct TimelineRow: View {
         }
         .padding(16)
     }
-}
-
-private struct TimelineEvent: Identifiable {
-    let id = UUID()
-    let time: String
-    let title: String
-    let detail: String
-    let symbol: String
-    let color: Color
-    let context: String?
-
-    static let preview = [
-        TimelineEvent(time: "08:40", title: "Drive to Victoria Island", detail: "14.2 km · 31 min", symbol: "car.fill", color: .indigo, context: "Sunny · light traffic"),
-        TimelineEvent(time: "09:30", title: "Product meeting", detail: "Mr. Kroenke · Eko Hotel", symbol: "person.2.fill", color: .orange, context: "From your calendar"),
-        TimelineEvent(time: "12:18", title: "Lunch at Nok", detail: "Victoria Island", symbol: "fork.knife", color: .pink, context: nil),
-        TimelineEvent(time: "15:05", title: "Drive home", detail: "13.7 km · 38 min", symbol: "car.fill", color: .indigo, context: "Light rain"),
-    ]
 }

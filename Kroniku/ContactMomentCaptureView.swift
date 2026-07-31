@@ -1,14 +1,32 @@
 import SwiftUI
+import SwiftData
 
 struct ContactMomentCaptureView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+
     @State private var note = ""
+    @State private var personName = ""
     @State private var interaction = Interaction.call
     @State private var isListening = false
+    @State private var occurredAt = Date()
+    @State private var saveErrorMessage: String?
+
+    private var trimmedNote: String {
+        note.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedPersonName: String {
+        personName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSave: Bool {
+        !(trimmedNote.isEmpty && trimmedPersonName.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 28) {
+            VStack(spacing: 18) {
                 VStack(spacing: 12) {
                     Button { isListening.toggle() } label: {
                         Image(systemName: isListening ? "waveform.circle.fill" : "mic.circle.fill")
@@ -23,7 +41,7 @@ struct ContactMomentCaptureView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
-                .padding(.top, 18)
+                .padding(.top, 6)
 
                 Picker("Interaction", selection: $interaction) {
                     ForEach(Interaction.allCases) { item in
@@ -33,12 +51,21 @@ struct ContactMomentCaptureView: View {
                 .pickerStyle(.segmented)
 
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("Who?").font(.headline)
+                    TextField("Person name (optional)", text: $personName)
+                        .padding(8)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text("What happened?").font(.headline)
                     TextField("e.g. Called Mr. Kroenke about the contract", text: $note, axis: .vertical)
                         .lineLimit(3...6)
                         .padding(12)
                         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
+
+                DatePicker("When", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
 
                 Spacer()
             }
@@ -48,18 +75,30 @@ struct ContactMomentCaptureView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { dismiss() }
+                    Button("Save") { saveContactMoment() }
                         .fontWeight(.semibold)
-                        .disabled(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!canSave)
                 }
             }
         }
+        .alert("Could not save moment", isPresented: Binding(get: { saveErrorMessage != nil }, set: { isPresented in
+            if !isPresented {
+                saveErrorMessage = nil
+            }
+        })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveErrorMessage ?? "Unknown error")
+        }
     }
-}
 
-private enum Interaction: String, CaseIterable, Identifiable {
-    case call, text, meeting
-    var id: Self { self }
-    var title: String { rawValue.capitalized }
-    var symbol: String { switch self { case .call: "phone.fill"; case .text: "message.fill"; case .meeting: "person.2.fill" } }
+    private func saveContactMoment() {
+        let repo = SwiftDataMemoryRepository(modelContext: modelContext)
+        do {
+            try repo.addContactMoment(personName: trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: trimmedNote)
+            dismiss()
+        } catch {
+            saveErrorMessage = error.localizedDescription
+        }
+    }
 }

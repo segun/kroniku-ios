@@ -17,6 +17,10 @@ struct RootTabView: View {
             MemoryView()
                 .tabItem { Label("Memory", systemImage: "sparkles") }
                 .tag(Tab.memory)
+
+            SettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(Tab.settings)
         }
         .tint(.indigo)
         .sheet(isPresented: $showsCapture) {
@@ -26,5 +30,5 @@ struct RootTabView: View {
 }
 
 private enum Tab: Hashable {
-    case timeline, places, memory
+    case timeline, places, memory, settings
 }
