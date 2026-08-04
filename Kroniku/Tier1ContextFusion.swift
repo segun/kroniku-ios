@@ -3,6 +3,9 @@ import SwiftUI
 import EventKit
 import CoreLocation
 import CoreMotion
+#if canImport(HealthKit)
+import HealthKit
+#endif
 #if canImport(WeatherKit)
 import WeatherKit
 #endif
@@ -31,6 +34,13 @@ protocol MotionContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess() async -> PermissionState
     func motionState(at date: Date) async -> MotionState?
+}
+
+@MainActor
+protocol HealthContextProviding {
+    var authorizationState: PermissionState { get }
+    func requestAccess(for metrics: Set<Tier1HealthMetric>) async -> PermissionState
+    func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary?
 }
 
 @MainActor
@@ -78,14 +88,18 @@ final class Tier1ContextController: ObservableObject {
     @Published private(set) var calendarPermission: PermissionState
     @Published private(set) var locationPermission: PermissionState
     @Published private(set) var motionPermission: PermissionState
+    @Published private(set) var healthPermission: PermissionState
 
     let consentStore: Tier1ConsentStore
     private let calendarProvider: CalendarContextProviding
     private let locationProvider: LocationContextProviding
     private let weatherProvider: WeatherContextProviding
     private let motionProvider: MotionContextProviding
+    private let healthProvider: HealthContextProviding
     private let timeLabelProvider: TimeSemanticLabelProviding
     private var cachedCalendarEventsByDay: [Date: CachedCalendarDay] = [:]
+    private var recentVisitSnapshot: VisitSnapshot?
+    private var recentWeatherSnapshot: (coordinate: GeoCoordinate, reading: WeatherReading)?
 
     init(
         consentStore: Tier1ConsentStore = Tier1ConsentStore(),
@@ -93,6 +107,7 @@ final class Tier1ContextController: ObservableObject {
         locationProvider: LocationContextProviding = CoreLocationVisitProvider(),
         weatherProvider: WeatherContextProviding = WeatherKitSnapshotProvider(),
         motionProvider: MotionContextProviding = CoreMotionStateProvider(),
+        healthProvider: HealthContextProviding = HealthKitSummaryProvider(),
         timeLabelProvider: TimeSemanticLabelProviding = DefaultTimeSemanticLabelProvider()
     ) {
         self.consentStore = consentStore
@@ -100,17 +115,33 @@ final class Tier1ContextController: ObservableObject {
         self.locationProvider = locationProvider
         self.weatherProvider = weatherProvider
         self.motionProvider = motionProvider
+        self.healthProvider = healthProvider
         self.timeLabelProvider = timeLabelProvider
         // Defer permission introspection until a privacy UI/action path requests it.
         self.calendarPermission = .notDetermined
         self.locationPermission = .notDetermined
         self.motionPermission = .notDetermined
+        self.healthPermission = .notDetermined
     }
 
     var consent: Tier1ConsentState { consentStore.consent }
 
     func markOnboardingComplete() {
-        consentStore.update { $0.hasCompletedOnboarding = true }
+        consentStore.update {
+            $0.hasCompletedOnboarding = true
+            $0.needsOnboardingResume = false
+        }
+    }
+
+    func markOnboardingDismissed(at page: Int) {
+        consentStore.update {
+            $0.needsOnboardingResume = true
+            $0.onboardingPage = page
+        }
+    }
+
+    func updateOnboardingPage(_ page: Int) {
+        consentStore.update { $0.onboardingPage = page }
     }
 
     func setCalendarImportEnabled(_ enabled: Bool) {
@@ -133,6 +164,20 @@ final class Tier1ContextController: ObservableObject {
         consentStore.update { $0.motionAttachmentEnabled = enabled }
     }
 
+    func setHealthMetric(_ metric: Tier1HealthMetric, enabled: Bool) {
+        consentStore.update {
+            if enabled {
+                $0.healthConsent.enabledMetrics.insert(metric)
+            } else {
+                $0.healthConsent.enabledMetrics.remove(metric)
+            }
+        }
+    }
+
+    func setPhotoAttachmentEnabled(_ enabled: Bool) {
+        consentStore.update { $0.photoAttachmentEnabled = enabled }
+    }
+
     func setTimeSemanticsEnabled(_ enabled: Bool) {
         consentStore.update { $0.timeSemanticsEnabled = enabled }
     }
@@ -141,6 +186,14 @@ final class Tier1ContextController: ObservableObject {
         calendarPermission = calendarProvider.authorizationState
         locationPermission = locationProvider.authorizationState
         motionPermission = motionProvider.authorizationState
+        let providerHealthState = healthProvider.authorizationState
+        if providerHealthState == .restricted {
+            healthPermission = .restricted
+        } else if consent.healthConsent.enabledMetrics.isEmpty {
+            healthPermission = .notDetermined
+        } else {
+            healthPermission = consent.healthAuthorizationState
+        }
         if calendarPermission != .authorized {
             cachedCalendarEventsByDay.removeAll()
         }
@@ -159,6 +212,20 @@ final class Tier1ContextController: ObservableObject {
 
     func requestMotionPermission() async {
         motionPermission = await motionProvider.requestAccess()
+    }
+
+    func requestHealthPermission() async {
+        let nextState = await healthProvider.requestAccess(for: consent.healthConsent.enabledMetrics)
+        healthPermission = nextState
+        consentStore.update { $0.healthAuthorizationState = nextState }
+    }
+
+    func applyRetention(into repo: MemoryRepositoryProtocol) async {
+        do {
+            try repo.applyRetentionPolicy(for: consent)
+        } catch {
+            print("Retention cleanup failed: \(error)")
+        }
     }
 
     func syncCalendarEvents(into repo: MemoryRepositoryProtocol, for day: Date = Date()) async {
@@ -253,27 +320,65 @@ final class Tier1ContextController: ObservableObject {
     }
 
     func buildEnrichment(for occurredAt: Date) async -> ContextEnrichment {
+        // Keep permission state in sync with the OS right before a capture attempt.
+        refreshPermissions()
+
         var visit: VisitSnapshot?
+        var locationSnapshot: VisitSnapshot?
         var weather: WeatherReading?
         var motionState: MotionState?
 
-        if consent.locationCaptureEnabled && locationPermission == .authorized {
-            visit = await locationProvider.captureVisit(around: occurredAt)
+        if locationPermission == .authorized,
+           (consent.locationCaptureEnabled || consent.weatherSnapshotsEnabled || consent.timeSemanticsEnabled) {
+            locationSnapshot = await locationProvider.captureVisit(around: occurredAt)
+            if let locationSnapshot {
+                recentVisitSnapshot = locationSnapshot
+            } else if let fallbackVisit = recentVisitSnapshot,
+                      abs(fallbackVisit.capturedAt.timeIntervalSince(occurredAt)) <= 90 * 60 {
+                // Reuse a very recent successful location when live capture is temporarily unavailable.
+                locationSnapshot = fallbackVisit
+            }
         }
 
-        if consent.weatherSnapshotsEnabled, let coordinate = visit?.coordinate {
+        if consent.locationCaptureEnabled {
+            visit = locationSnapshot
+        }
+
+        if consent.weatherSnapshotsEnabled, let coordinate = locationSnapshot?.coordinate {
             weather = await weatherProvider.weather(at: occurredAt, coordinate: coordinate)
+            if let weather {
+                recentWeatherSnapshot = (coordinate: coordinate, reading: weather)
+            } else if let fallback = recentWeatherSnapshot,
+                      abs(fallback.reading.observedAt.timeIntervalSince(occurredAt)) <= 90 * 60,
+                      isLikelySameArea(lhs: coordinate, rhs: fallback.coordinate) {
+                weather = WeatherReading(
+                    observedAt: occurredAt,
+                    condition: fallback.reading.condition,
+                    temperatureC: fallback.reading.temperatureC
+                )
+            }
         }
 
         if consent.motionAttachmentEnabled && motionPermission == .authorized {
             motionState = await motionProvider.motionState(at: occurredAt)
         }
 
+        let healthSummary: HealthSummary?
+        if consent.healthConsent.isEnabled && healthPermission == .authorized {
+            healthSummary = await healthProvider.summary(for: occurredAt, metrics: consent.healthConsent.enabledMetrics)
+        } else {
+            healthSummary = nil
+        }
+
         let labels = consent.timeSemanticsEnabled
-            ? timeLabelProvider.labels(for: occurredAt, coordinate: visit?.coordinate)
+            ? timeLabelProvider.labels(for: occurredAt, coordinate: locationSnapshot?.coordinate)
             : []
 
-        return ContextEnrichment(visit: visit, weather: weather, motionState: motionState, timeSemanticLabels: labels)
+        return ContextEnrichment(visit: visit, weather: weather, motionState: motionState, healthSummary: healthSummary, timeSemanticLabels: labels)
+    }
+
+    private func isLikelySameArea(lhs: GeoCoordinate, rhs: GeoCoordinate) -> Bool {
+        return abs(lhs.latitude - rhs.latitude) <= 0.02 && abs(lhs.longitude - rhs.longitude) <= 0.02
     }
 }
 
@@ -437,13 +542,66 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
             )
         } catch {
             print("Weather fetch failed: \(error)")
-            return nil
+            return await openMeteoFallback(at: date, coordinate: coordinate)
         }
 #else
-        _ = date
-        _ = coordinate
-        return nil
+        return await openMeteoFallback(at: date, coordinate: coordinate)
 #endif
+    }
+
+    private struct OpenMeteoResponse: Decodable {
+        struct Current: Decodable {
+            var temperature2m: Double
+            var weatherCode: Int
+
+            private enum CodingKeys: String, CodingKey {
+                case temperature2m = "temperature_2m"
+                case weatherCode = "weather_code"
+            }
+        }
+
+        var current: Current?
+    }
+
+    private func openMeteoFallback(at date: Date, coordinate: GeoCoordinate) async -> WeatherReading? {
+        var components = URLComponents(string: "https://api.open-meteo.com/v1/forecast")
+        components?.queryItems = [
+            URLQueryItem(name: "latitude", value: "\(coordinate.latitude)"),
+            URLQueryItem(name: "longitude", value: "\(coordinate.longitude)"),
+            URLQueryItem(name: "current", value: "temperature_2m,weather_code"),
+            URLQueryItem(name: "timezone", value: "auto")
+        ]
+        guard let url = components?.url else { return nil }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoded = try JSONDecoder().decode(OpenMeteoResponse.self, from: data)
+            guard let current = decoded.current else { return nil }
+            return WeatherReading(
+                observedAt: date,
+                condition: openMeteoCondition(for: current.weatherCode),
+                temperatureC: current.temperature2m
+            )
+        } catch {
+            print("Open-Meteo fallback failed: \(error)")
+            return nil
+        }
+    }
+
+    private func openMeteoCondition(for code: Int) -> String {
+        switch code {
+        case 0: return "Clear"
+        case 1, 2: return "Partly cloudy"
+        case 3: return "Overcast"
+        case 45, 48: return "Fog"
+        case 51, 53, 55, 56, 57: return "Drizzle"
+        case 61, 63, 65, 66, 67: return "Rain"
+        case 71, 73, 75, 77: return "Snow"
+        case 80, 81, 82: return "Rain showers"
+        case 85, 86: return "Snow showers"
+        case 95, 96, 99: return "Thunderstorm"
+        default: return "Weather"
+        }
     }
 }
 
@@ -508,6 +666,160 @@ final class CoreMotionStateProvider: MotionContextProviding {
             }
         }
     }
+}
+
+@MainActor
+struct HealthKitSummaryProvider: HealthContextProviding {
+#if canImport(HealthKit)
+    private let store = HKHealthStore()
+#endif
+
+    var authorizationState: PermissionState {
+#if canImport(HealthKit)
+        guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
+        return .notDetermined
+#else
+        return .restricted
+#endif
+    }
+
+    func requestAccess(for metrics: Set<Tier1HealthMetric>) async -> PermissionState {
+#if canImport(HealthKit)
+        guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
+        let sampleTypes = Set(metrics.compactMap(sampleType(for:)))
+        guard !sampleTypes.isEmpty else { return authorizationState }
+
+        do {
+            try await store.requestAuthorization(toShare: [], read: sampleTypes)
+            return .authorized
+        } catch {
+            print("Health permission request failed: \(error)")
+            return .denied
+        }
+#else
+        _ = metrics
+        return .restricted
+#endif
+    }
+
+    func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
+#if canImport(HealthKit)
+        guard authorizationState == .authorized else { return nil }
+        var entries: [HealthSummary.Entry] = []
+        let dayInterval = Calendar.current.dateInterval(of: .day, for: date) ?? DateInterval(start: date, end: date.addingTimeInterval(24 * 60 * 60))
+
+        if metrics.contains(.steps), let total = try? await cumulativeSum(for: .stepCount, unit: .count(), in: dayInterval) {
+            entries.append(.init(metric: .steps, value: "\(Int(total.rounded())) steps"))
+        }
+
+        if metrics.contains(.heartRate), let avg = try? await discreteAverage(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), in: dayInterval) {
+            entries.append(.init(metric: .heartRate, value: "\(Int(avg.rounded())) bpm avg"))
+        }
+
+        if metrics.contains(.mindfulMinutes), let total = try? await mindfulMinutes(in: dayInterval) {
+            entries.append(.init(metric: .mindfulMinutes, value: "\(Int(total.rounded())) mindful min"))
+        }
+
+        if metrics.contains(.sleep), let hours = try? await sleepHours(in: dayInterval) {
+            entries.append(.init(metric: .sleep, value: String(format: "%.1f hr sleep", hours)))
+        }
+
+        guard !entries.isEmpty else { return nil }
+        return HealthSummary(capturedAt: date, entries: entries)
+#else
+        _ = date
+        _ = metrics
+        return nil
+#endif
+    }
+
+#if canImport(HealthKit)
+    private func sampleType(for metric: Tier1HealthMetric) -> HKSampleType? {
+        switch metric {
+        case .steps:
+            return HKObjectType.quantityType(forIdentifier: .stepCount)
+        case .heartRate:
+            return HKObjectType.quantityType(forIdentifier: .heartRate)
+        case .sleep:
+            return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
+        case .mindfulMinutes:
+            return HKObjectType.categoryType(forIdentifier: .mindfulSession)
+        }
+    }
+
+    private func cumulativeSum(for identifier: HKQuantityTypeIdentifier, unit: HKUnit, in interval: DateInterval) async throws -> Double {
+        guard let type = HKObjectType.quantityType(forIdentifier: identifier) else { return 0 }
+        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: predicate, options: .cumulativeSum) { _, result, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    let value = result?.sumQuantity()?.doubleValue(for: unit) ?? 0
+                    continuation.resume(returning: value)
+                }
+            }
+            store.execute(query)
+        }
+    }
+
+    private func discreteAverage(for identifier: HKQuantityTypeIdentifier, unit: HKUnit, in interval: DateInterval) async throws -> Double {
+        guard let type = HKObjectType.quantityType(forIdentifier: identifier) else { return 0 }
+        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: predicate, options: .discreteAverage) { _, result, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    let value = result?.averageQuantity()?.doubleValue(for: unit) ?? 0
+                    continuation.resume(returning: value)
+                }
+            }
+            store.execute(query)
+        }
+    }
+
+    private func sleepHours(in interval: DateInterval) async throws -> Double {
+        guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return 0 }
+        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let totalSeconds = (samples as? [HKCategorySample] ?? [])
+                    .filter { $0.value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepCore.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepDeep.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepREM.rawValue }
+                    .reduce(0.0) { partial, sample in
+                        partial + sample.endDate.timeIntervalSince(sample.startDate)
+                    }
+                continuation.resume(returning: totalSeconds / 3600)
+            }
+            store.execute(query)
+        }
+    }
+
+    private func mindfulMinutes(in interval: DateInterval) async throws -> Double {
+        guard let type = HKObjectType.categoryType(forIdentifier: .mindfulSession) else { return 0 }
+        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let totalSeconds = (samples as? [HKCategorySample] ?? [])
+                    .reduce(0.0) { partial, sample in
+                        partial + sample.endDate.timeIntervalSince(sample.startDate)
+                    }
+                continuation.resume(returning: totalSeconds / 60)
+            }
+            store.execute(query)
+        }
+    }
+#endif
 }
 
 @MainActor

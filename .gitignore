@@ -64,3 +64,4 @@ playground.xcworkspace
 
 # macOS Finder attributes
 ._*
+.derivedData

@@ -22,8 +22,9 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 /// A small repository wrapper around a SwiftData ModelContext.
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?) throws
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment]) throws
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws
+    func applyRetentionPolicy(for consent: Tier1ConsentState) throws
     func delete(event: MemoryEvent) throws
     func update(event: MemoryEvent) throws
 }
@@ -48,7 +49,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = []) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -78,7 +79,8 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             context: interaction.title,
             contextCard: contextCard,
             symbolName: interaction.symbol,
-            colorName: "indigo"
+            colorName: "indigo",
+            photoAttachments: photoAttachments
         )
 
         apply(enrichment: contextEnrichment, to: me)
@@ -128,13 +130,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
 
         for item in normalizedImported {
             if let event = existingByExternalID[item.externalID] {
-                event.occurredAt = item.startsAt
-                event.title = item.title
-                event.detail = item.locationName
-                event.context = formatTimeRange(start: item.startsAt, end: item.endsAt)
-                event.contextCard = calendarContextCard(from: item)
-                applyCalendarEnrichment(from: item, to: event)
-                event.updatedAt = Date()
+                if updateCalendarEvent(event, with: item) {
+                    event.updatedAt = Date()
+                }
                 continue
             }
 
@@ -176,6 +174,56 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
     }
 
+    func applyRetentionPolicy(for consent: Tier1ConsentState) throws {
+        let events = fetchAll()
+        for event in events {
+            if event.source == "calendar" && !consent.calendarImportEnabled {
+                modelContext.delete(event)
+                continue
+            }
+
+            if !consent.calendarAttendeesAndLocationsEnabled && event.source == "calendar" {
+                event.detail = nil
+                event.place = nil
+                event.weatherSnapshot = nil
+                scrubMetadata(keys: ["attendees", "location", "weather"], from: event)
+            }
+
+            if !consent.locationCaptureEnabled && event.source != "calendar" {
+                event.place = nil
+                scrubMetadata(keys: ["visit"], from: event)
+            }
+
+            if !consent.weatherSnapshotsEnabled {
+                event.weatherSnapshot = nil
+                scrubMetadata(keys: ["weather"], from: event)
+            }
+
+            if !consent.motionAttachmentEnabled {
+                scrubMetadata(keys: ["motion"], from: event)
+            }
+
+            if !consent.timeSemanticsEnabled {
+                scrubMetadata(keys: ["timeSemantics"], from: event)
+            }
+
+            if !consent.healthConsent.isEnabled {
+                event.healthSummary = nil
+            }
+
+            if !consent.photoAttachmentEnabled {
+                event.photoAttachments = []
+            }
+
+            event.updatedAt = Date()
+        }
+
+        if modelContext.hasChanges {
+            try modelContext.save()
+            NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+        }
+    }
+
     private func apply(enrichment: ContextEnrichment?, to event: MemoryEvent) {
         guard let enrichment else { return }
 
@@ -191,6 +239,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         if let motion = enrichment.motionState {
             metadata.append(.init(key: "motion", value: motion.rawValue))
         }
+        if let healthSummary = enrichment.healthSummary, !healthSummary.isEmpty {
+            event.healthSummary = healthSummary
+        }
         if !enrichment.timeSemanticLabels.isEmpty {
             metadata.append(.init(key: "timeSemantics", value: enrichment.timeSemanticLabels.joined(separator: ",")))
         }
@@ -199,6 +250,12 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             card.metadata = metadata
             event.contextCard = card
         }
+    }
+
+    private func scrubMetadata(keys: Set<String>, from event: MemoryEvent) {
+        guard var card = event.contextCard else { return }
+        card.metadata.removeAll { keys.contains($0.key) }
+        event.contextCard = card
     }
 
     private func calendarContextCard(from item: TimelineCalendarImportEvent) -> ContextCard {
@@ -232,25 +289,91 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         return formatter.string(from: start, to: end)
     }
 
-    private func applyCalendarEnrichment(from item: TimelineCalendarImportEvent, to event: MemoryEvent) {
+    private func updateCalendarEvent(_ event: MemoryEvent, with item: TimelineCalendarImportEvent) -> Bool {
+        var hasChanges = false
+
+        if event.occurredAt != item.startsAt {
+            event.occurredAt = item.startsAt
+            hasChanges = true
+        }
+        if event.title != item.title {
+            event.title = item.title
+            hasChanges = true
+        }
+        if event.detail != item.locationName {
+            event.detail = item.locationName
+            hasChanges = true
+        }
+
+        let timeRange = formatTimeRange(start: item.startsAt, end: item.endsAt)
+        if event.context != timeRange {
+            event.context = timeRange
+            hasChanges = true
+        }
+
+        let nextCard = calendarContextCard(from: item)
+        if event.contextCard != nextCard {
+            event.contextCard = nextCard
+            hasChanges = true
+        }
+
+        if applyCalendarEnrichment(from: item, to: event) {
+            hasChanges = true
+        }
+
+        return hasChanges
+    }
+
+    private func applyCalendarEnrichment(from item: TimelineCalendarImportEvent, to event: MemoryEvent) -> Bool {
+        var hasChanges = false
+
         if let coordinate = item.locationCoordinate {
             if let place = event.place {
-                place.name = item.locationName ?? place.name
-                place.latitude = coordinate.latitude
-                place.longitude = coordinate.longitude
+                let nextName = item.locationName ?? place.name
+                if place.name != nextName {
+                    place.name = nextName
+                    hasChanges = true
+                }
+                if place.latitude != coordinate.latitude {
+                    place.latitude = coordinate.latitude
+                    hasChanges = true
+                }
+                if place.longitude != coordinate.longitude {
+                    place.longitude = coordinate.longitude
+                    hasChanges = true
+                }
             } else {
                 event.place = Place(name: item.locationName ?? "Calendar location", latitude: coordinate.latitude, longitude: coordinate.longitude)
+                hasChanges = true
             }
+        } else if event.place != nil {
+            event.place = nil
+            hasChanges = true
         }
 
         if let weather = item.weather {
             if let snapshot = event.weatherSnapshot {
-                snapshot.observedAt = weather.observedAt
-                snapshot.condition = weather.condition
-                snapshot.temperatureC = weather.temperatureC
+                if snapshot.observedAt != weather.observedAt {
+                    snapshot.observedAt = weather.observedAt
+                    hasChanges = true
+                }
+                if snapshot.condition != weather.condition {
+                    snapshot.condition = weather.condition
+                    hasChanges = true
+                }
+                if snapshot.temperatureC != weather.temperatureC {
+                    snapshot.temperatureC = weather.temperatureC
+                    hasChanges = true
+                }
             } else {
                 event.weatherSnapshot = WeatherSnapshot(observedAt: weather.observedAt, condition: weather.condition, temperatureC: weather.temperatureC)
+                hasChanges = true
             }
+        } else if event.weatherSnapshot != nil {
+            event.weatherSnapshot = nil
+            hasChanges = true
         }
+
+        return hasChanges
     }
 }

@@ -163,11 +163,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Kroniku/Kroniku.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = QLNTY3GVPQ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Kroniku can import calendar events when you opt in.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Kroniku can read the health metrics you choose so it can summarize them on memories you capture.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Kroniku can attach nearby places to moments when you opt in.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Kroniku can attach motion state like walking or driving when you opt in.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -188,11 +190,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Kroniku/Kroniku.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = QLNTY3GVPQ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Kroniku can import calendar events when you opt in.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Kroniku can read the health metrics you choose so it can summarize them on memories you capture.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Kroniku can attach nearby places to moments when you opt in.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Kroniku can attach motion state like walking or driving when you opt in.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

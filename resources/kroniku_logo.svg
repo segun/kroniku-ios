@@ -1,0 +1,77 @@
+<svg viewBox="0 0 1200 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBC689"/>
+      <stop offset="100%" stop-color="#E8703F"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="900" fill="#F7F4EC"/>
+
+  <!-- ============ 1. PRIMARY LOCKUP (dark) ============ -->
+  <g>
+    <rect x="0" y="0" width="1200" height="380" fill="#141A38"/>
+
+    <!-- icon mark -->
+    <g transform="translate(150,90) scale(0.16)">
+      <path d="M 250 730 Q 430 400 690 300"
+            fill="none" stroke="#F7F4EC" stroke-width="82" stroke-linecap="round" opacity="0.94"/>
+      <circle cx="705" cy="290" r="148" fill="url(#nodeGrad)"/>
+    </g>
+
+    <!-- wordmark -->
+    <text x="470" y="215" font-family="'Poppins','Century Gothic',Futura,sans-serif" font-size="96" font-weight="600" fill="#F7F4EC" letter-spacing="1">Kroniku</text>
+
+    <text x="472" y="262" font-family="'Poppins',Arial,sans-serif" font-size="24" font-weight="400" fill="#9AA3D6" letter-spacing="6">THE MEMORY OPERATING SYSTEM</text>
+  </g>
+
+  <!-- ============ 2. APP ICON (rounded square) ============ -->
+  <g transform="translate(90,460)">
+    <rect width="260" height="260" rx="58" fill="#141A38"/>
+    <g transform="translate(38,30) scale(0.185)">
+      <path d="M 250 730 Q 430 400 690 300"
+            fill="none" stroke="#F7F4EC" stroke-width="82" stroke-linecap="round" opacity="0.94"/>
+      <circle cx="705" cy="290" r="148" fill="url(#nodeGrad)"/>
+    </g>
+  </g>
+  <text x="90" y="758" font-family="'Poppins',Arial,sans-serif" font-size="20" fill="#4A4F63" letter-spacing="2">APP ICON</text>
+
+  <!-- ============ 3. MONOGRAM (favicon scale) ============ -->
+  <g transform="translate(430,460)">
+    <rect width="180" height="180" rx="40" fill="#141A38"/>
+    <g transform="translate(24,20) scale(0.128)">
+      <path d="M 250 730 Q 430 400 690 300"
+            fill="none" stroke="#F7F4EC" stroke-width="82" stroke-linecap="round" opacity="0.94"/>
+      <circle cx="705" cy="290" r="148" fill="url(#nodeGrad)"/>
+    </g>
+  </g>
+  <text x="430" y="758" font-family="'Poppins',Arial,sans-serif" font-size="20" fill="#4A4F63" letter-spacing="2">FAVICON</text>
+
+  <!-- ============ 4. LIGHT / ON-WHITE LOCKUP ============ -->
+  <g transform="translate(650,460)">
+    <rect width="470" height="260" rx="20" fill="#FFFFFF" stroke="#E7E2D4" stroke-width="1.5"/>
+    <g transform="translate(38,58) scale(0.135)">
+      <path d="M 250 730 Q 430 400 690 300"
+            fill="none" stroke="#141A38" stroke-width="82" stroke-linecap="round" opacity="0.9"/>
+      <circle cx="705" cy="290" r="148" fill="url(#nodeGrad)"/>
+    </g>
+    <text x="180" y="115" font-family="'Poppins','Century Gothic',Futura,sans-serif" font-size="46" font-weight="600" fill="#161C3D">Kroniku</text>
+    <text x="182" y="140" font-family="'Poppins',Arial,sans-serif" font-size="13" fill="#8A8F9E" letter-spacing="3">MEMORY OPERATING SYSTEM</text>
+  </g>
+  <text x="650" y="758" font-family="'Poppins',Arial,sans-serif" font-size="20" fill="#4A4F63" letter-spacing="2">ON-WHITE LOCKUP</text>
+
+  <!-- ============ Palette swatches ============ -->
+  <g transform="translate(90,800)">
+    <rect width="60" height="60" rx="10" fill="#141A38"/>
+    <text x="0" y="80" font-family="Arial" font-size="14" fill="#4A4F63">#141A38</text>
+
+    <rect x="90" width="60" height="60" rx="10" fill="#FBC689"/>
+    <text x="90" y="80" font-family="Arial" font-size="14" fill="#4A4F63">#FBC689</text>
+
+    <rect x="180" width="60" height="60" rx="10" fill="#E8703F"/>
+    <text x="180" y="80" font-family="Arial" font-size="14" fill="#4A4F63">#E8703F</text>
+
+    <rect x="270" width="60" height="60" rx="10" fill="#F7F4EC" stroke="#E7E2D4"/>
+    <text x="270" y="80" font-family="Arial" font-size="14" fill="#4A4F63">#F7F4EC</text>
+  </g>
+</svg>

@@ -57,7 +57,7 @@ struct MemoryView: View {
     @State private var query = ""
 
     var body: some View {
-        KronikuHeroShell(title: "Ask your timeline", subtitle: "Retrieval Console") {
+        KronikuHeroShell(title: "", subtitle: "Retrieve Memory") {
             VStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Search memory")

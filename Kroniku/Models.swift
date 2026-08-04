@@ -1,6 +1,71 @@
 import Foundation
 import SwiftData
 
+enum Tier1HealthMetric: String, Codable, Hashable, CaseIterable, Identifiable {
+    case steps
+    case heartRate
+    case sleep
+    case mindfulMinutes
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .steps:
+            return "Steps"
+        case .heartRate:
+            return "Heart rate"
+        case .sleep:
+            return "Sleep"
+        case .mindfulMinutes:
+            return "Mindful minutes"
+        }
+    }
+}
+
+struct Tier1HealthConsent: Codable, Hashable {
+    var enabledMetrics: Set<Tier1HealthMetric> = []
+
+    var isEnabled: Bool {
+        !enabledMetrics.isEmpty
+    }
+}
+
+struct HealthSummary: Codable, Hashable {
+    struct Entry: Codable, Hashable, Identifiable {
+        let id: UUID
+        var metric: Tier1HealthMetric
+        var value: String
+
+        init(id: UUID = UUID(), metric: Tier1HealthMetric, value: String) {
+            self.id = id
+            self.metric = metric
+            self.value = value
+        }
+    }
+
+    var capturedAt: Date
+    var entries: [Entry]
+
+    var isEmpty: Bool {
+        entries.isEmpty
+    }
+}
+
+struct PhotoAttachment: Codable, Hashable, Identifiable {
+    let id: UUID
+    var filename: String
+    var imageData: Data
+    var addedAt: Date
+
+    init(id: UUID = UUID(), filename: String, imageData: Data, addedAt: Date = Date()) {
+        self.id = id
+        self.filename = filename
+        self.imageData = imageData
+        self.addedAt = addedAt
+    }
+}
+
 enum PermissionState: String, Codable, Hashable {
     case notDetermined
     case authorized
@@ -49,12 +114,14 @@ struct ContextEnrichment: Codable, Hashable {
     var visit: VisitSnapshot?
     var weather: WeatherReading?
     var motionState: MotionState?
+    var healthSummary: HealthSummary?
     var timeSemanticLabels: [String]
 
-    init(visit: VisitSnapshot? = nil, weather: WeatherReading? = nil, motionState: MotionState? = nil, timeSemanticLabels: [String] = []) {
+    init(visit: VisitSnapshot? = nil, weather: WeatherReading? = nil, motionState: MotionState? = nil, healthSummary: HealthSummary? = nil, timeSemanticLabels: [String] = []) {
         self.visit = visit
         self.weather = weather
         self.motionState = motionState
+        self.healthSummary = healthSummary
         self.timeSemanticLabels = timeSemanticLabels
     }
 }
@@ -65,8 +132,13 @@ struct Tier1ConsentState: Codable, Hashable {
     var locationCaptureEnabled: Bool = false
     var weatherSnapshotsEnabled: Bool = false
     var motionAttachmentEnabled: Bool = false
+    var healthConsent: Tier1HealthConsent = Tier1HealthConsent()
+    var healthAuthorizationState: PermissionState = .notDetermined
+    var photoAttachmentEnabled: Bool = false
     var timeSemanticsEnabled: Bool = true
     var hasCompletedOnboarding: Bool = false
+    var needsOnboardingResume: Bool = false
+    var onboardingPage: Int = 0
 }
 
 // Extensible context card metadata attached to a memory event.
@@ -115,8 +187,10 @@ final class MemoryEvent: Identifiable {
     @Relationship(inverse: \ContactMoment.memoryEvent) var contactMoment: ContactMoment?
     var place: Place?
     var weatherSnapshot: WeatherSnapshot?
+    var healthSummary: HealthSummary?
+    var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, photoAttachments: [PhotoAttachment] = []) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.occurredAt = occurredAt
@@ -129,6 +203,8 @@ final class MemoryEvent: Identifiable {
         self.colorName = colorName
         self.place = place
         self.weatherSnapshot = weatherSnapshot
+        self.healthSummary = healthSummary
+        self.photoAttachments = photoAttachments
     }
 }
 

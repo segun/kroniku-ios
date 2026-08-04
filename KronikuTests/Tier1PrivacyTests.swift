@@ -31,6 +31,7 @@ final class Tier1PrivacyTests: XCTestCase {
             locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
             weatherProvider: FakeWeatherProvider(),
             motionProvider: FakeMotionProvider(permission: .denied, state: nil),
+            healthProvider: FakeHealthProvider(permission: .denied, summary: nil),
             timeLabelProvider: FakeLabelProvider(labels: [])
         )
 
@@ -69,6 +70,7 @@ final class Tier1PrivacyTests: XCTestCase {
             locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
             weatherProvider: FakeWeatherProvider(),
             motionProvider: FakeMotionProvider(permission: .denied, state: nil),
+            healthProvider: FakeHealthProvider(permission: .denied, summary: nil),
             timeLabelProvider: FakeLabelProvider(labels: [])
         )
 
@@ -90,6 +92,7 @@ final class Tier1PrivacyTests: XCTestCase {
             $0.locationCaptureEnabled = true
             $0.weatherSnapshotsEnabled = true
             $0.motionAttachmentEnabled = true
+            $0.healthConsent.enabledMetrics = [.steps]
             $0.timeSemanticsEnabled = true
         }
 
@@ -100,6 +103,7 @@ final class Tier1PrivacyTests: XCTestCase {
             locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
             weatherProvider: weatherProvider,
             motionProvider: FakeMotionProvider(permission: .denied, state: .walking),
+            healthProvider: FakeHealthProvider(permission: .denied, summary: HealthSummary(capturedAt: Date(), entries: [.init(metric: .steps, value: "3000 steps")])),
             timeLabelProvider: FakeLabelProvider(labels: ["weekend"])
         )
 
@@ -108,6 +112,7 @@ final class Tier1PrivacyTests: XCTestCase {
         XCTAssertNil(enrichment.visit)
         XCTAssertNil(enrichment.weather)
         XCTAssertNil(enrichment.motionState)
+        XCTAssertNil(enrichment.healthSummary)
         XCTAssertEqual(enrichment.timeSemanticLabels, ["weekend"])
         XCTAssertFalse(weatherProvider.called)
     }
@@ -139,6 +144,7 @@ final class Tier1PrivacyTests: XCTestCase {
             locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
             weatherProvider: FakeWeatherProvider(),
             motionProvider: FakeMotionProvider(permission: .denied, state: nil),
+            healthProvider: FakeHealthProvider(permission: .denied, summary: nil),
             timeLabelProvider: FakeLabelProvider(labels: [])
         )
 
@@ -192,6 +198,7 @@ final class Tier1PrivacyTests: XCTestCase {
             locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
             weatherProvider: FakeWeatherProvider(),
             motionProvider: FakeMotionProvider(permission: .denied, state: nil),
+            healthProvider: FakeHealthProvider(permission: .denied, summary: nil),
             timeLabelProvider: FakeLabelProvider(labels: [])
         )
 
@@ -203,6 +210,73 @@ final class Tier1PrivacyTests: XCTestCase {
         XCTAssertTrue(titles.contains("Day one"))
         XCTAssertTrue(titles.contains("Day two"))
         XCTAssertEqual(calendarProvider.fetchCallCount, 2)
+    }
+
+    @MainActor
+    func testRetentionPolicyScrubsDisabledSources() async throws {
+        let repo = MockMemoryRepository()
+        let healthSummary = HealthSummary(capturedAt: Date(), entries: [.init(metric: .steps, value: "4200 steps")])
+        let photo = PhotoAttachment(filename: "test.jpg", imageData: Data([0x00, 0x01]))
+
+        try repo.addContactMoment(
+            personName: "Alice",
+            interactionType: "call",
+            occurredAt: Date(),
+            note: "Follow-up",
+            contextEnrichment: ContextEnrichment(
+                visit: VisitSnapshot(name: "HQ", coordinate: GeoCoordinate(latitude: 1, longitude: 2), capturedAt: Date()),
+                weather: WeatherReading(observedAt: Date(), condition: "clear", temperatureC: 20),
+                motionState: .walking,
+                healthSummary: healthSummary,
+                timeSemanticLabels: ["weekend"]
+            ),
+            photoAttachments: [photo]
+        )
+
+        let consent = Tier1ConsentState(
+            calendarImportEnabled: false,
+            calendarAttendeesAndLocationsEnabled: false,
+            locationCaptureEnabled: false,
+            weatherSnapshotsEnabled: false,
+            motionAttachmentEnabled: false,
+            healthConsent: Tier1HealthConsent(enabledMetrics: []),
+            photoAttachmentEnabled: false,
+            timeSemanticsEnabled: false,
+            hasCompletedOnboarding: false,
+            needsOnboardingResume: false,
+            onboardingPage: 0
+        )
+
+        try repo.applyRetentionPolicy(for: consent)
+
+        let event = try XCTUnwrap(repo.fetchAll().first)
+        XCTAssertNil(event.place)
+        XCTAssertNil(event.weatherSnapshot)
+        XCTAssertNil(event.healthSummary)
+        XCTAssertTrue(event.photoAttachments.isEmpty)
+        XCTAssertFalse(event.contextCard?.metadata.contains(where: { $0.key == "motion" }) ?? true)
+        XCTAssertFalse(event.contextCard?.metadata.contains(where: { $0.key == "timeSemantics" }) ?? true)
+    }
+
+    @MainActor
+    func testHealthPermissionRequestPersistsAuthorizedState() async {
+        let store = makeStore()
+        store.update { $0.healthConsent.enabledMetrics = [.steps, .heartRate] }
+
+        let controller = Tier1ContextController(
+            consentStore: store,
+            calendarProvider: FakeCalendarProvider(permission: .denied, events: []),
+            locationProvider: FakeLocationProvider(permission: .denied, visit: nil),
+            weatherProvider: FakeWeatherProvider(),
+            motionProvider: FakeMotionProvider(permission: .denied, state: nil),
+            healthProvider: FakeHealthProvider(permission: .authorized, summary: nil),
+            timeLabelProvider: FakeLabelProvider(labels: [])
+        )
+
+        await controller.requestHealthPermission()
+
+        XCTAssertEqual(controller.healthPermission, .authorized)
+        XCTAssertEqual(store.consent.healthAuthorizationState, .authorized)
     }
 
     @MainActor
@@ -288,6 +362,29 @@ private final class FakeMotionProvider: MotionContextProviding {
     func motionState(at date: Date) async -> MotionState? {
         _ = date
         return state
+    }
+}
+
+private final class FakeHealthProvider: HealthContextProviding {
+    var permission: PermissionState
+    var summaryValue: HealthSummary?
+
+    init(permission: PermissionState, summary: HealthSummary?) {
+        self.permission = permission
+        self.summaryValue = summary
+    }
+
+    var authorizationState: PermissionState { permission }
+
+    func requestAccess(for metrics: Set<Tier1HealthMetric>) async -> PermissionState {
+        _ = metrics
+        return permission
+    }
+
+    func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
+        _ = date
+        _ = metrics
+        return summaryValue
     }
 }
 

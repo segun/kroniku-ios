@@ -20,7 +20,7 @@ struct RootTabView: View {
                 .tabItem { Label("Memory", systemImage: "sparkles") }
                 .tag(Tab.memory)
 
-            SettingsView()
+            SettingsView(showsTier1Onboarding: $showsTier1Onboarding)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
@@ -32,16 +32,21 @@ struct RootTabView: View {
             ContactMomentCaptureView()
                 .environmentObject(contextController)
         }
-        .sheet(isPresented: $showsTier1Onboarding) {
+        .sheet(isPresented: $showsTier1Onboarding, onDismiss: handleOnboardingDismissed) {
             Tier1OnboardingView()
                 .environmentObject(contextController)
         }
         .onAppear {
-            if !contextController.consent.hasCompletedOnboarding {
+            if !contextController.consent.hasCompletedOnboarding && !contextController.consent.needsOnboardingResume {
                 showsTier1Onboarding = true
             }
         }
         .preferredColorScheme(.light)
+    }
+
+    private func handleOnboardingDismissed() {
+        guard !contextController.consent.hasCompletedOnboarding else { return }
+        contextController.markOnboardingDismissed(at: contextController.consent.onboardingPage)
     }
 }
 

@@ -1,0 +1,18 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBC689"/>
+      <stop offset="100%" stop-color="#E8703F"/>
+    </linearGradient>
+  </defs>
+
+  <!-- solid flat background, no gradient/glow noise -->
+  <rect width="1024" height="1024" fill="#141A38"/>
+
+  <!-- one clean single-arc swoosh into the node, no wiggle -->
+  <path d="M 250 730 Q 430 400 690 300"
+        fill="none" stroke="#F7F4EC" stroke-width="82" stroke-linecap="round" opacity="0.94"/>
+
+  <!-- single bold terminal node, crisp flat gradient, no blur -->
+  <circle cx="705" cy="290" r="148" fill="url(#nodeGrad)"/>
+</svg>

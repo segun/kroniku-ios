@@ -10,7 +10,7 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = []) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -39,7 +39,8 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
                 ]
             ),
             symbolName: interaction.symbol,
-            colorName: "indigo"
+            colorName: "indigo",
+            photoAttachments: photoAttachments
         )
         if let enrichment = contextEnrichment {
             if let visit = enrichment.visit {
@@ -47,6 +48,9 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
             }
             if let weather = enrichment.weather {
                 me.weatherSnapshot = WeatherSnapshot(observedAt: weather.observedAt, condition: weather.condition, temperatureC: weather.temperatureC)
+            }
+            if let healthSummary = enrichment.healthSummary {
+                me.healthSummary = healthSummary
             }
             if !enrichment.timeSemanticLabels.isEmpty {
                 me.contextCard?.metadata.append(.init(key: "timeSemantics", value: enrichment.timeSemanticLabels.joined(separator: ",")))
@@ -102,5 +106,37 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
 
     func update(event: MemoryEvent) throws {
         // in-memory objects are mutated in place; nothing to do
+    }
+
+    func applyRetentionPolicy(for consent: Tier1ConsentState) throws {
+        events.removeAll { $0.source == "calendar" && !consent.calendarImportEnabled }
+        for event in events {
+            if !consent.calendarAttendeesAndLocationsEnabled && event.source == "calendar" {
+                event.detail = nil
+                event.place = nil
+                event.weatherSnapshot = nil
+                event.contextCard?.metadata.removeAll { ["attendees", "location", "weather"].contains($0.key) }
+            }
+            if !consent.locationCaptureEnabled && event.source != "calendar" {
+                event.place = nil
+                event.contextCard?.metadata.removeAll { $0.key == "visit" }
+            }
+            if !consent.weatherSnapshotsEnabled {
+                event.weatherSnapshot = nil
+                event.contextCard?.metadata.removeAll { $0.key == "weather" }
+            }
+            if !consent.motionAttachmentEnabled {
+                event.contextCard?.metadata.removeAll { $0.key == "motion" }
+            }
+            if !consent.timeSemanticsEnabled {
+                event.contextCard?.metadata.removeAll { $0.key == "timeSemantics" }
+            }
+            if !consent.healthConsent.isEnabled {
+                event.healthSummary = nil
+            }
+            if !consent.photoAttachmentEnabled {
+                event.photoAttachments = []
+            }
+        }
     }
 }
