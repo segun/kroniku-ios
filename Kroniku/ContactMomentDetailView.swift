@@ -12,6 +12,13 @@ struct ContactMomentDetailView: View {
     @State private var interaction: Interaction = .call
     @State private var occurredAt: Date = Date()
 
+    private var detailMetadata: [ContextCard.MetadataEntry] {
+        let metadata = event.contextCard?.metadata ?? []
+        return metadata.filter { entry in
+            !(entry.key == "interactionType" || entry.key == "captureMethod")
+        }
+    }
+
     init(event: MemoryEvent) {
         self.event = event
         // initialize states from linked contact moment if available
@@ -29,45 +36,143 @@ struct ContactMomentDetailView: View {
     }
 
     var body: some View {
-        Form {
-            Section(header: Text("When")) {
-                DatePicker("Occurred at", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
-            }
+        ZStack {
+            KronikuPalette.canvasGradient
+                .ignoresSafeArea()
 
-            Section(header: Text("Interaction")) {
-                Picker("Interaction", selection: $interaction) {
-                    ForEach(Interaction.allCases) { i in
-                        Label(i.title, systemImage: i.symbol).tag(i)
+            ScrollView {
+                VStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(event.isReadOnlySource ? "Calendar detail" : "Edit moment")
+                            .font(.title2.weight(.bold))
+                            .fontDesign(.rounded)
+                            .foregroundStyle(KronikuPalette.paper)
+                        Text(event.isReadOnlySource ? "Read-only source metadata" : "Refine how this memory is stored")
+                            .font(.subheadline)
+                            .foregroundStyle(KronikuPalette.fog)
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+
+                    if event.isReadOnlySource {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("Imported from calendar", systemImage: "calendar.badge.clock")
+                                .font(.headline.weight(.semibold))
+                                .fontDesign(.rounded)
+
+                            if let contextCard = event.contextCard {
+                                ForEach(contextCard.metadata) { entry in
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(entry.key.capitalized)
+                                            .fontWeight(.semibold)
+                                        Spacer()
+                                        Text(entry.value)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.trailing)
+                                    }
+                                }
+                            }
+                        }
+                        .kronikuCard()
+                    } else {
+                        VStack(spacing: 12) {
+                            fieldBlock(title: "When") {
+                                DatePicker("Occurred at", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
+                                    .labelsHidden()
+                            }
+
+                            fieldBlock(title: "Interaction") {
+                                Picker("Interaction", selection: $interaction) {
+                                    ForEach(Interaction.allCases) { i in
+                                        Label(i.title, systemImage: i.symbol).tag(i)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                            }
+
+                            fieldBlock(title: "Who") {
+                                TextField("Person name", text: $personName)
+                                    .textFieldStyle(.plain)
+                                    .padding(12)
+                                    .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+
+                            fieldBlock(title: "Note") {
+                                TextEditor(text: $note)
+                                    .frame(minHeight: 130)
+                                    .padding(6)
+                                    .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+
+                            if !detailMetadata.isEmpty || event.place != nil || event.weatherSnapshot != nil {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Context")
+                                        .font(.headline.weight(.semibold))
+                                        .fontDesign(.rounded)
+
+                                    if let place = event.place?.name, !place.isEmpty {
+                                        metadataRow(title: "Place", value: place)
+                                    }
+
+                                    if let weather = event.weatherSnapshot,
+                                       let condition = weather.condition,
+                                       let temperatureC = weather.temperatureC {
+                                        metadataRow(title: "Weather", value: "\(condition), \(Int(temperatureC.rounded()))C")
+                                    }
+
+                                    ForEach(detailMetadata) { entry in
+                                        metadataRow(title: entry.key, value: entry.value)
+                                    }
+                                }
+                            }
+
+                            if event.contactMoment != nil {
+                                Button(role: .destructive) { deleteBoth() } label: {
+                                    Label("Delete contact moment", systemImage: "trash")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .padding(.top, 6)
+                            }
+                        }
+                        .kronikuCard()
                     }
                 }
-                .pickerStyle(.segmented)
-            }
-
-            Section(header: Text("Who")) {
-                TextField("Person name", text: $personName)
-            }
-
-            Section(header: Text("Note")) {
-                TextEditor(text: $note)
-                    .frame(minHeight: 120)
-            }
-
-            if event.contactMoment != nil {
-                Section {
-                    Button(role: .destructive) { deleteBoth() } label: {
-                        Text("Delete contact moment")
-                    }
-                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
         }
         .navigationTitle("Contact moment")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { saveChanges() }
-                    .fontWeight(.semibold)
-                    .disabled(personName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if !event.isReadOnlySource {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveChanges() }
+                        .fontWeight(.semibold)
+                        .disabled(personName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
+        }
+    }
+
+    private func fieldBlock<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .fontDesign(.rounded)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func metadataRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title.capitalized)
+                .fontWeight(.semibold)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
         }
     }
 
@@ -84,6 +189,7 @@ struct ContactMomentDetailView: View {
             event.title = note
             event.detail = personName
             event.context = interaction.title
+            let preservedMetadata = detailMetadata
             event.contextCard = ContextCard(
                 source: "contactMoment",
                 category: "interaction",
@@ -91,7 +197,7 @@ struct ContactMomentDetailView: View {
                 metadata: [
                     .init(key: "interactionType", value: interaction.rawValue),
                     .init(key: "captureMethod", value: cm.captureMethod)
-                ]
+                ] + preservedMetadata
             )
             event.updatedAt = Date()
 
@@ -112,6 +218,7 @@ struct ContactMomentDetailView: View {
             event.title = note
             event.detail = personName
             event.context = interaction.title
+            let preservedMetadata = detailMetadata
             event.contextCard = ContextCard(
                 source: "contactMoment",
                 category: "interaction",
@@ -119,7 +226,7 @@ struct ContactMomentDetailView: View {
                 metadata: [
                     .init(key: "interactionType", value: interaction.rawValue),
                     .init(key: "captureMethod", value: "typed")
-                ]
+                ] + preservedMetadata
             )
 
             modelContext.insert(cm)

@@ -5,7 +5,41 @@ struct TimelineView: View {
     @Binding var showsCapture: Bool
 
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var contextController: Tier1ContextController
     @State private var events: [MemoryEvent] = []
+    @State private var selectedDate = Date()
+    @State private var showsDatePicker = false
+
+    private let calendar = Calendar.current
+
+    private var isShowingToday: Bool {
+        calendar.isDate(selectedDate, inSameDayAs: Date())
+    }
+
+    private var filteredEvents: [MemoryEvent] {
+        events.filter { event in
+            guard let occurredAt = event.occurredAt else { return false }
+            return calendar.isDate(occurredAt, inSameDayAs: selectedDate)
+        }
+    }
+
+    private var sortedEvents: [MemoryEvent] {
+        filteredEvents.sorted { lhs, rhs in
+            let lhsDate = lhs.occurredAt ?? .distantFuture
+            let rhsDate = rhs.occurredAt ?? .distantFuture
+            if lhsDate != rhsDate {
+                return lhsDate < rhsDate
+            }
+
+            let lhsTitle = lhs.title ?? ""
+            let rhsTitle = rhs.title ?? ""
+            if lhsTitle != rhsTitle {
+                return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+            }
+
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
 
     private func loadEvents() {
         let repo = SwiftDataMemoryRepository(modelContext: modelContext)
@@ -14,68 +48,210 @@ struct TimelineView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
-                    daySummary
-                    Label("Today", systemImage: "calendar")
-                        .font(.title3.weight(.semibold))
+            KronikuHeroShell(title: heroTitle, subtitle: "Memory Timeline") {
+                daySummary
 
-                    LazyVStack(spacing: 0) {
-                        ForEach(events) { event in
-                            NavigationLink(destination: ContactMomentDetailView(event: event)) {
-                                TimelineRow(event: event)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Timeline")
+                            .font(.title3.weight(.semibold))
+                            .fontDesign(.rounded)
+                        Spacer()
+                        Text("\(sortedEvents.count) events")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if sortedEvents.isEmpty {
+                        emptyState
+                    } else {
+                        LazyVStack(spacing: 10) {
+                            ForEach(sortedEvents) { event in
+                                if event.isReadOnlySource {
+                                    TimelineRow(event: event)
+                                } else {
+                                    NavigationLink(destination: ContactMomentDetailView(event: event)) {
+                                        TimelineRow(event: event)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
                         }
                     }
-                    .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 }
-                .padding()
+                .kronikuCard(.context)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("Kroniku")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showsCapture = true } label: {
                         Image(systemName: "plus")
-                            .fontWeight(.semibold)
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(KronikuPalette.paper)
+                            .frame(width: 34, height: 34)
+                            .background(KronikuPalette.emberGradient, in: Circle())
                     }
                     .accessibilityLabel("Add a memory")
                 }
             }
         }
-        .onAppear { loadEvents() }
-        .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in loadEvents() }
+        .onAppear {
+            loadEvents()
+            Task { await refreshCalendarEvents() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in
+            loadEvents()
+            Task { await refreshCalendarEvents() }
+        }
+        .onChange(of: selectedDate) { _, _ in
+            loadEvents()
+            Task { await refreshCalendarEvents() }
+        }
+        .sheet(isPresented: $showsDatePicker) {
+            NavigationStack {
+                VStack(spacing: 20) {
+                    DatePicker(
+                        "Timeline date",
+                        selection: $selectedDate,
+                        in: ...Date(),
+                        displayedComponents: .date
+                    )
+                    .datePickerStyle(.graphical)
+                    .labelsHidden()
+
+                    if !isShowingToday {
+                        Button("Back to Today") {
+                            selectedDate = Date()
+                        }
+                        .font(.headline)
+                    }
+
+                    Spacer()
+                }
+                .padding()
+                .navigationTitle("Choose a day")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showsDatePicker = false }
+                            .fontWeight(.semibold)
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(Date(), format: .dateTime.weekday().month().day())
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text("A day worth remembering.")
-                .font(.largeTitle.bold())
+    private var heroTitle: String {
+        if isShowingToday {
+            return "Today, remembered"
         }
+        return selectedDate.formatted(.dateTime.weekday(.wide).month().day())
     }
 
     private var daySummary: some View {
-        HStack(spacing: 16) {
-            Label("28° · Sunny", systemImage: "sun.max.fill")
-            Divider()
-            Label("3 places", systemImage: "mappin.and.ellipse")
-            Divider()
-            Label("42 km", systemImage: "car.fill")
+        HStack(spacing: 10) {
+            Button {
+                showsDatePicker = true
+            } label: {
+                statChip(icon: "calendar", title: selectedDate.formatted(.dateTime.weekday(.abbreviated).month().day()))
+            }
+            .buttonStyle(.plain)
+
+            if !isShowingToday {
+                Button {
+                    selectedDate = Date()
+                } label: {
+                    statChip(icon: "arrow.uturn.backward", title: "Today")
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .font(.subheadline.weight(.medium))
-        .foregroundStyle(.secondary)
-        .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.indigo.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func statChip(icon: String, title: String) -> some View {
+        Label(title, systemImage: icon)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(KronikuPalette.paper)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(KronikuPalette.heroGradient, in: Capsule())
+    }
+
+    private var emptyStateMessage: String {
+        if isShowingToday {
+            return "Tap the + button to save a contact moment. Calendar imports appear after consent."
+        }
+        return "No events were recorded for this day. Pick another date or jump back to today."
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No memories yet")
+                .font(.headline.weight(.semibold))
+                .fontDesign(.rounded)
+            Text(emptyStateMessage)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+    }
+
+    private func refreshCalendarEvents() async {
+        let repo = SwiftDataMemoryRepository(modelContext: modelContext)
+        await contextController.syncCalendarEvents(into: repo, for: selectedDate)
+        loadEvents()
     }
 }
 
 private struct TimelineRow: View {
     let event: MemoryEvent
+
+    private var contextHighlights: [String] {
+        var highlights: [String] = []
+
+        if let weather = event.weatherSnapshot,
+           let condition = weather.condition,
+           let temperatureC = weather.temperatureC {
+            highlights.append("\(condition) \(Int(temperatureC.rounded()))C")
+        }
+
+        if let place = event.place?.name, !place.isEmpty {
+            highlights.append(place)
+        }
+
+        let metadata = event.contextCard?.metadata ?? []
+        for entry in metadata {
+            switch entry.key {
+            case "interactionType", "captureMethod", "location", "weather", "visit":
+                continue
+            default:
+                if !entry.value.isEmpty {
+                    highlights.append(entry.value.replacingOccurrences(of: ",", with: " · "))
+                }
+            }
+        }
+
+        var deduped: [String] = []
+        for item in highlights where !deduped.contains(item) {
+            deduped.append(item)
+        }
+        return Array(deduped.prefix(3))
+    }
+
+    private var rowFill: LinearGradient {
+        event.isReadOnlySource
+            ? KronikuCardTone.calendar.fill
+            : KronikuCardTone.neutral.fill
+    }
+
+    private var rowBorder: Color {
+        event.isReadOnlySource
+            ? KronikuCardTone.calendar.borderColor
+            : Color.black.opacity(0.05)
+    }
 
     private func color(for name: String?) -> Color {
         switch name {
@@ -89,44 +265,71 @@ private struct TimelineRow: View {
 
     private var timeText: String {
         if let date = event.occurredAt {
-            return date.formatted(.dateTime.hour().minute())
+            return date.formatted(.dateTime.hour(.twoDigits(amPM: .abbreviated)).minute())
         }
         return "--:--"
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 12) {
             Text(timeText)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(KronikuPalette.night.opacity(0.72))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(width: 74, alignment: .leading)
 
-            VStack(spacing: 0) {
-                Image(systemName: event.symbolName ?? "circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(color(for: event.colorName))
-                    .frame(width: 32, height: 32)
-                    .background(color(for: event.colorName).opacity(0.12), in: Circle())
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.16))
-                    .frame(width: 1)
-                    .frame(maxHeight: .infinity)
-            }
+            Image(systemName: event.symbolName ?? "circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(color(for: event.colorName))
+                .frame(width: 34, height: 34)
+                .background(color(for: event.colorName).opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(event.title ?? "Untitled").font(.body.weight(.semibold))
-                if let detail = event.detail {
-                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(event.title ?? "Untitled")
+                    .font(.body.weight(.semibold))
+                    .fontDesign(.rounded)
+                if let detail = event.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                if let context = event.context {
+                if let context = event.context, !context.isEmpty {
                     Text(context)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .padding(.top, 2)
+                }
+                if !contextHighlights.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(contextHighlights, id: \.self) { item in
+                                Text(item)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(KronikuPalette.night)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(KronikuPalette.sand.opacity(0.95), in: Capsule())
+                            }
+                        }
+                    }
+                }
+                if event.isReadOnlySource {
+                    Text("Read-only calendar")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(KronikuPalette.night)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(KronikuPalette.sand, in: Capsule())
                 }
             }
+
             Spacer(minLength: 0)
         }
-        .padding(16)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(rowFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(rowBorder, lineWidth: 1)
+        )
     }
 }

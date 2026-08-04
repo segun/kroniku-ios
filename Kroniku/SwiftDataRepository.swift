@@ -1,6 +1,5 @@
 import Foundation
 import SwiftData
-import Combine
 
 extension Notification.Name {
     static let memoryRepositoryChanged = Notification.Name("memoryRepositoryChanged")
@@ -23,7 +22,8 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 /// A small repository wrapper around a SwiftData ModelContext.
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String) throws
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?) throws
+    func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws
     func delete(event: MemoryEvent) throws
     func update(event: MemoryEvent) throws
 }
@@ -48,7 +48,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed") throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -80,6 +80,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             symbolName: interaction.symbol,
             colorName: "indigo"
         )
+
+        apply(enrichment: contextEnrichment, to: me)
+
         cm.memoryEvent = me
         me.contactMoment = cm
 
@@ -89,6 +92,73 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         try modelContext.save()
 
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+    }
+
+    func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws {
+        let calendar = Calendar.current
+        let existing = fetchAll().filter {
+            $0.source == "calendar" && ($0.occurredAt.map { calendar.isDate($0, inSameDayAs: day) } ?? false)
+        }
+        var existingByExternalID: [String: MemoryEvent] = [:]
+        var duplicateExisting: [MemoryEvent] = []
+        for event in existing {
+            guard let externalSourceID = event.externalSourceID else { continue }
+            if existingByExternalID[externalSourceID] == nil {
+                existingByExternalID[externalSourceID] = event
+            } else {
+                duplicateExisting.append(event)
+            }
+        }
+
+        // Keep one event per external ID to avoid dictionary collisions on subsequent syncs.
+        for duplicate in duplicateExisting {
+            modelContext.delete(duplicate)
+        }
+
+        var importedByExternalID: [String: TimelineCalendarImportEvent] = [:]
+        for item in imported {
+            importedByExternalID[item.externalID] = item
+        }
+
+        let normalizedImported = importedByExternalID.values.sorted { $0.startsAt < $1.startsAt }
+        let importedIDs = Set(importedByExternalID.keys)
+        for stale in existing where !(stale.externalSourceID.map(importedIDs.contains) ?? false) {
+            modelContext.delete(stale)
+        }
+
+        for item in normalizedImported {
+            if let event = existingByExternalID[item.externalID] {
+                event.occurredAt = item.startsAt
+                event.title = item.title
+                event.detail = item.locationName
+                event.context = formatTimeRange(start: item.startsAt, end: item.endsAt)
+                event.contextCard = calendarContextCard(from: item)
+                applyCalendarEnrichment(from: item, to: event)
+                event.updatedAt = Date()
+                continue
+            }
+
+            let event = MemoryEvent(
+                externalSourceID: item.externalID,
+                isReadOnlySource: true,
+                occurredAt: item.startsAt,
+                source: "calendar",
+                title: item.title,
+                detail: item.locationName,
+                context: formatTimeRange(start: item.startsAt, end: item.endsAt),
+                contextCard: calendarContextCard(from: item),
+                symbolName: "calendar",
+                colorName: "orange"
+            )
+            applyCalendarEnrichment(from: item, to: event)
+            modelContext.insert(event)
+            existingByExternalID[item.externalID] = event
+        }
+
+        if modelContext.hasChanges {
+            try modelContext.save()
+            NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+        }
     }
 
     func delete(event: MemoryEvent) throws {
@@ -104,5 +174,83 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         // For now, assume the event object is already modified in-place.
         try modelContext.save()
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+    }
+
+    private func apply(enrichment: ContextEnrichment?, to event: MemoryEvent) {
+        guard let enrichment else { return }
+
+        var metadata = event.contextCard?.metadata ?? []
+        if let visit = enrichment.visit {
+            event.place = Place(name: visit.name, latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
+            metadata.append(.init(key: "visit", value: visit.name))
+        }
+        if let weather = enrichment.weather {
+            event.weatherSnapshot = WeatherSnapshot(observedAt: weather.observedAt, condition: weather.condition, temperatureC: weather.temperatureC)
+            metadata.append(.init(key: "weather", value: "\(weather.condition), \(Int(weather.temperatureC.rounded()))C"))
+        }
+        if let motion = enrichment.motionState {
+            metadata.append(.init(key: "motion", value: motion.rawValue))
+        }
+        if !enrichment.timeSemanticLabels.isEmpty {
+            metadata.append(.init(key: "timeSemantics", value: enrichment.timeSemanticLabels.joined(separator: ",")))
+        }
+
+        if var card = event.contextCard {
+            card.metadata = metadata
+            event.contextCard = card
+        }
+    }
+
+    private func calendarContextCard(from item: TimelineCalendarImportEvent) -> ContextCard {
+        var metadata: [ContextCard.MetadataEntry] = []
+
+        if !item.attendeeNames.isEmpty {
+            metadata.append(.init(key: "attendees", value: item.attendeeNames.joined(separator: ", ")))
+        }
+        if let location = item.locationName, !location.isEmpty {
+            metadata.append(.init(key: "location", value: location))
+        }
+        if let weather = item.weather {
+            metadata.append(.init(key: "weather", value: "\(weather.condition), \(Int(weather.temperatureC.rounded()))C"))
+        }
+        if !item.timeSemanticLabels.isEmpty {
+            metadata.append(.init(key: "timeSemantics", value: item.timeSemanticLabels.joined(separator: ",")))
+        }
+
+        return ContextCard(
+            source: "calendar",
+            category: "schedule",
+            summary: item.title,
+            metadata: metadata
+        )
+    }
+
+    private func formatTimeRange(start: Date, end: Date) -> String {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: start, to: end)
+    }
+
+    private func applyCalendarEnrichment(from item: TimelineCalendarImportEvent, to event: MemoryEvent) {
+        if let coordinate = item.locationCoordinate {
+            if let place = event.place {
+                place.name = item.locationName ?? place.name
+                place.latitude = coordinate.latitude
+                place.longitude = coordinate.longitude
+            } else {
+                event.place = Place(name: item.locationName ?? "Calendar location", latitude: coordinate.latitude, longitude: coordinate.longitude)
+            }
+        }
+
+        if let weather = item.weather {
+            if let snapshot = event.weatherSnapshot {
+                snapshot.observedAt = weather.observedAt
+                snapshot.condition = weather.condition
+                snapshot.temperatureC = weather.temperatureC
+            } else {
+                event.weatherSnapshot = WeatherSnapshot(observedAt: weather.observedAt, condition: weather.condition, temperatureC: weather.temperatureC)
+            }
+        }
     }
 }

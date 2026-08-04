@@ -1,6 +1,74 @@
 import Foundation
 import SwiftData
 
+enum PermissionState: String, Codable, Hashable {
+    case notDetermined
+    case authorized
+    case denied
+    case restricted
+}
+
+enum MotionState: String, Codable, Hashable {
+    case driving
+    case walking
+    case running
+    case cycling
+    case stationary
+}
+
+struct GeoCoordinate: Codable, Hashable {
+    var latitude: Double
+    var longitude: Double
+}
+
+struct VisitSnapshot: Codable, Hashable {
+    var name: String
+    var coordinate: GeoCoordinate
+    var capturedAt: Date
+}
+
+struct WeatherReading: Codable, Hashable {
+    var observedAt: Date
+    var condition: String
+    var temperatureC: Double
+}
+
+struct TimelineCalendarImportEvent: Codable, Hashable {
+    var externalID: String
+    var title: String
+    var startsAt: Date
+    var endsAt: Date
+    var locationName: String?
+    var locationCoordinate: GeoCoordinate?
+    var weather: WeatherReading?
+    var attendeeNames: [String]
+    var timeSemanticLabels: [String]
+}
+
+struct ContextEnrichment: Codable, Hashable {
+    var visit: VisitSnapshot?
+    var weather: WeatherReading?
+    var motionState: MotionState?
+    var timeSemanticLabels: [String]
+
+    init(visit: VisitSnapshot? = nil, weather: WeatherReading? = nil, motionState: MotionState? = nil, timeSemanticLabels: [String] = []) {
+        self.visit = visit
+        self.weather = weather
+        self.motionState = motionState
+        self.timeSemanticLabels = timeSemanticLabels
+    }
+}
+
+struct Tier1ConsentState: Codable, Hashable {
+    var calendarImportEnabled: Bool = false
+    var calendarAttendeesAndLocationsEnabled: Bool = false
+    var locationCaptureEnabled: Bool = false
+    var weatherSnapshotsEnabled: Bool = false
+    var motionAttachmentEnabled: Bool = false
+    var timeSemanticsEnabled: Bool = true
+    var hasCompletedOnboarding: Bool = false
+}
+
 // Extensible context card metadata attached to a memory event.
 struct ContextCard: Codable, Hashable {
     struct MetadataEntry: Codable, Hashable, Identifiable {
@@ -31,6 +99,8 @@ struct ContextCard: Codable, Hashable {
 @Model
 final class MemoryEvent: Identifiable {
     @Attribute(.unique) var id: UUID = UUID()
+    var externalSourceID: String?
+    var isReadOnlySource: Bool = false
     var occurredAt: Date?
     var source: String?
     var title: String?
@@ -46,7 +116,9 @@ final class MemoryEvent: Identifiable {
     var place: Place?
     var weatherSnapshot: WeatherSnapshot?
 
-    init(occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil) {
+        self.externalSourceID = externalSourceID
+        self.isReadOnlySource = isReadOnlySource
         self.occurredAt = occurredAt
         self.source = source
         self.title = title
