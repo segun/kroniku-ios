@@ -7,6 +7,7 @@ struct ContactMomentDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var contextController: Tier1ContextController
+    @Query(sort: \MemoryEvent.occurredAt, order: .reverse) private var allEvents: [MemoryEvent]
 
     let event: MemoryEvent
 
@@ -19,6 +20,8 @@ struct ContactMomentDetailView: View {
     @State private var isEditing = false
     @State private var selectedMapDestination: MapDestination?
     @State private var showsMapChooser = false
+    @State private var selectedLinkedEvent: MemoryEvent?
+    @State private var showsLinkedEventChooser = false
 
     private struct MapDestination {
         var query: String
@@ -40,6 +43,12 @@ struct ContactMomentDetailView: View {
             }
         }
         return values
+    }
+
+    private var linkedEvents: [MemoryEvent] {
+        allEvents.filter { candidate in
+            candidate.id != event.id && event.linkedEventIDs.contains(candidate.id)
+        }
     }
 
     init(event: MemoryEvent) {
@@ -148,16 +157,58 @@ struct ContactMomentDetailView: View {
                 await loadPhotoAttachments(from: newItems)
             }
         }
-        .confirmationDialog("Open in Maps", isPresented: $showsMapChooser, titleVisibility: .visible) {
-            Button("Apple Maps") {
-                openSelectedDestinationInAppleMaps()
+        .sheet(isPresented: $showsMapChooser) {
+            NavigationStack {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Choose which app to open for this place.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Button {
+                        showsMapChooser = false
+                        openSelectedDestinationInAppleMaps()
+                    } label: {
+                        Label("Apple Maps", systemImage: "map")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(KronikuPalette.ink)
+
+                    Button {
+                        showsMapChooser = false
+                        openSelectedDestinationInGoogleMaps()
+                    } label: {
+                        Label("Google Maps", systemImage: "globe")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Cancel", role: .cancel) {
+                        showsMapChooser = false
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(20)
+                .navigationTitle("Open in Maps")
+                .navigationBarTitleDisplayMode(.inline)
             }
-            Button("Google Maps") {
-                openSelectedDestinationInGoogleMaps()
+            .presentationDetents([.height(280)])
+            .presentationDragIndicator(.visible)
+        }
+        .confirmationDialog("Open linked memory", isPresented: $showsLinkedEventChooser, titleVisibility: .visible) {
+            ForEach(linkedEvents) { linked in
+                Button(linked.title ?? "Untitled") {
+                    selectedLinkedEvent = linked
+                }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Choose which app to open for this place.")
+            Text("Choose a related memory to open.")
+        }
+        .navigationDestination(item: $selectedLinkedEvent) { linked in
+            ContactMomentDetailView(event: linked)
         }
     }
 
@@ -191,6 +242,33 @@ struct ContactMomentDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            if !linkedEvents.isEmpty {
+                Button {
+                    if linkedEvents.count == 1 {
+                        selectedLinkedEvent = linkedEvents[0]
+                    } else {
+                        showsLinkedEventChooser = true
+                    }
+                } label: {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("Linked")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 92, alignment: .leading)
+                        HStack(spacing: 6) {
+                            Text("\(linkedEvents.count) related event\(linkedEvents.count == 1 ? "" : "s")")
+                                .font(.subheadline.weight(.semibold))
+                                .underline()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.bold))
+                        }
+                        .foregroundStyle(.blue)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .buttonStyle(.plain)
             }
 
             contextSummary
@@ -393,6 +471,7 @@ struct ContactMomentDetailView: View {
             Text(value)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .padding(.leading, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }

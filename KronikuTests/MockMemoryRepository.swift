@@ -10,7 +10,7 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = []) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = []) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -22,7 +22,15 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
             throw MemoryRepositoryError.invalidInteraction
         }
 
-        let cm = ContactMoment(personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: trimmedNote, captureMethod: captureMethod)
+        var metadata: [ContextCard.MetadataEntry] = [
+            .init(key: "interactionType", value: interaction.rawValue),
+            .init(key: "captureMethod", value: captureMethod)
+        ]
+        if let bluetoothContext {
+            metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
+        }
+
+        let cm = ContactMoment(personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: trimmedNote, captureMethod: captureMethod, resolvedContactIdentifier: resolvedContactIdentifier)
         let me = MemoryEvent(
             occurredAt: occurredAt,
             source: "contactMoment",
@@ -33,15 +41,15 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
                 source: "contactMoment",
                 category: "interaction",
                 summary: trimmedNote,
-                metadata: [
-                    .init(key: "interactionType", value: interaction.rawValue),
-                    .init(key: "captureMethod", value: captureMethod)
-                ]
+                metadata: metadata
             ),
             symbolName: interaction.symbol,
             colorName: "indigo",
+            extractionReview: extractionReview,
             photoAttachments: photoAttachments
         )
+        me.confidenceScore = confidenceScore
+        me.linkedEventIDs = linkedEventIDs
         if let enrichment = contextEnrichment {
             if let visit = enrichment.visit {
                 me.place = Place(name: visit.name, latitude: visit.coordinate.latitude, longitude: visit.coordinate.longitude)
@@ -108,6 +116,12 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         // in-memory objects are mutated in place; nothing to do
     }
 
+    func linkEvent(_ eventID: UUID, to linkedEventIDs: [UUID]) throws {
+        guard let event = events.first(where: { $0.id == eventID }) else { return }
+        let linked = Set(linkedEventIDs.filter { $0 != eventID })
+        event.linkedEventIDs = Array(Set(event.linkedEventIDs).union(linked))
+    }
+
     func applyRetentionPolicy(for consent: Tier1ConsentState) throws {
         events.removeAll { $0.source == "calendar" && !consent.calendarImportEnabled }
         for event in events {
@@ -136,6 +150,16 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
             }
             if !consent.photoAttachmentEnabled {
                 event.photoAttachments = []
+            }
+            if !consent.voiceTranscriptionEnabled {
+                event.extractionReview = nil
+                event.contextCard?.metadata.removeAll { ["bluetoothContext", "transcriptConfidence", "extractedPerson", "extractedInteraction"].contains($0.key) }
+            }
+            if !consent.bluetoothContextEnabled {
+                event.contextCard?.metadata.removeAll { $0.key == "bluetoothContext" }
+            }
+            if !consent.contactsResolutionEnabled {
+                event.contactMoment?.resolvedContactIdentifier = nil
             }
         }
     }

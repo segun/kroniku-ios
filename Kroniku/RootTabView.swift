@@ -5,6 +5,7 @@ struct RootTabView: View {
     @State private var showsCapture = false
     @State private var showsTier1Onboarding = false
     @StateObject private var contextController = Tier1ContextController()
+    @StateObject private var tier2Controller = Tier2ContextController()
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -28,9 +29,11 @@ struct RootTabView: View {
         .toolbarBackground(KronikuPalette.paper, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .environmentObject(contextController)
+        .environmentObject(tier2Controller)
         .sheet(isPresented: $showsCapture) {
             ContactMomentCaptureView()
                 .environmentObject(contextController)
+            .environmentObject(tier2Controller)
         }
         .sheet(isPresented: $showsTier1Onboarding, onDismiss: handleOnboardingDismissed) {
             Tier1OnboardingView()

@@ -81,6 +81,30 @@ enum MotionState: String, Codable, Hashable {
     case stationary
 }
 
+enum BluetoothContextKind: String, Codable, Hashable {
+    case car
+    case headphones
+    case speaker
+}
+
+struct ExtractedEntityConfidence: Codable, Hashable {
+    var person: Double
+    var interaction: Double
+    var timestamp: Double
+
+    var overall: Double {
+        max(0, min(1, (person + interaction + timestamp) / 3))
+    }
+}
+
+struct Tier2ExtractionReview: Codable, Hashable {
+    var transcript: String
+    var extractedPersonName: String?
+    var extractedInteractionType: String?
+    var extractedOccurredAt: Date?
+    var confidence: ExtractedEntityConfidence
+}
+
 struct GeoCoordinate: Codable, Hashable {
     var latitude: Double
     var longitude: Double
@@ -136,6 +160,10 @@ struct Tier1ConsentState: Codable, Hashable {
     var healthAuthorizationState: PermissionState = .notDetermined
     var photoAttachmentEnabled: Bool = false
     var timeSemanticsEnabled: Bool = true
+    var voiceTranscriptionEnabled: Bool = false
+    var noteIngestionEnabled: Bool = false
+    var contactsResolutionEnabled: Bool = false
+    var bluetoothContextEnabled: Bool = false
     var hasCompletedOnboarding: Bool = false
     var needsOnboardingResume: Bool = false
     var onboardingPage: Int = 0
@@ -183,14 +211,17 @@ final class MemoryEvent: Identifiable {
     var colorName: String?
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
+    var linkedEventIDs: [UUID] = []
+    var confidenceScore: Double?
 
     @Relationship(inverse: \ContactMoment.memoryEvent) var contactMoment: ContactMoment?
     var place: Place?
     var weatherSnapshot: WeatherSnapshot?
     var healthSummary: HealthSummary?
+    var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, photoAttachments: [PhotoAttachment] = []) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.occurredAt = occurredAt
@@ -204,7 +235,10 @@ final class MemoryEvent: Identifiable {
         self.place = place
         self.weatherSnapshot = weatherSnapshot
         self.healthSummary = healthSummary
+        self.extractionReview = extractionReview
         self.photoAttachments = photoAttachments
+        self.linkedEventIDs = linkedEventIDs
+        self.confidenceScore = confidenceScore
     }
 }
 
@@ -216,17 +250,19 @@ final class ContactMoment: Identifiable {
     var occurredAt: Date
     var note: String
     var captureMethod: String
+    var resolvedContactIdentifier: String?
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
 
     var memoryEvent: MemoryEvent?
 
-    init(personName: String? = nil, interactionType: String = "call", occurredAt: Date = Date(), note: String = "", captureMethod: String = "typed") {
+    init(personName: String? = nil, interactionType: String = "call", occurredAt: Date = Date(), note: String = "", captureMethod: String = "typed", resolvedContactIdentifier: String? = nil) {
         self.personName = personName
         self.interactionType = interactionType
         self.occurredAt = occurredAt
         self.note = note
         self.captureMethod = captureMethod
+        self.resolvedContactIdentifier = resolvedContactIdentifier
     }
 }
 

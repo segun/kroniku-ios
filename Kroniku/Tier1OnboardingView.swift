@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct Tier1OnboardingView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openURL) private var openURL
     @EnvironmentObject private var contextController: Tier1ContextController
 
     @State private var currentPage = 0
@@ -17,7 +19,7 @@ struct Tier1OnboardingView: View {
 
                 VStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 10) {
-                        KronikuLogoRow(subtitle: "Tier 1 Onboarding")
+                        KronikuLogoRow(subtitle: "Onboarding")
                         Text("Context preferences")
                             .font(.system(size: 30, weight: .bold, design: .rounded))
                             .foregroundStyle(KronikuPalette.paper)
@@ -79,20 +81,9 @@ struct Tier1OnboardingView: View {
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Toggle("Attach nearby places", isOn: consentBinding(
-                        get: { contextController.consent.locationCaptureEnabled },
-                        set: { contextController.setLocationCaptureEnabled($0) }
-                    ))
-
-                    Toggle("Attach weather snapshots", isOn: consentBinding(
-                        get: { contextController.consent.weatherSnapshotsEnabled },
-                        set: { contextController.setWeatherSnapshotsEnabled($0) }
-                    ))
-
-                    Toggle("Attach motion state", isOn: consentBinding(
-                        get: { contextController.consent.motionAttachmentEnabled },
-                        set: { contextController.setMotionAttachmentEnabled($0) }
-                    ))
+                    Text("Grant permission first. When you allow access, Kroniku enables nearby places, weather snapshots, and motion state by default.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
 
                     permissionRow(
                         title: "Location permission",
@@ -148,17 +139,15 @@ struct Tier1OnboardingView: View {
                     Text("HealthKit")
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
-                    Text("Choose the exact HealthKit metrics that can be summarized on captured memories.")
+
+                    Text("Grant permission first. Kroniku enables Steps, Heart rate, Sleep, and Mindful minutes by default after you allow access.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-
-                    ForEach(Tier1HealthMetric.allCases) { metric in
-                        Toggle(metric.title, isOn: healthMetricBinding(metric))
-                    }
 
                     permissionRow(
                         title: "HealthKit permission",
                         status: contextController.healthPermission,
+                        canRetryWhenDenied: true,
                         action: { Task { await contextController.requestHealthPermission() } }
                     )
                 }
@@ -258,17 +247,6 @@ struct Tier1OnboardingView: View {
         )
     }
 
-    private func healthMetricBinding(_ metric: Tier1HealthMetric) -> Binding<Bool> {
-        Binding(
-            get: { contextController.consent.healthConsent.enabledMetrics.contains(metric) },
-            set: { enabled in
-                updateConsent {
-                    contextController.setHealthMetric(metric, enabled: enabled)
-                }
-            }
-        )
-    }
-
     private func updateConsent(syncCalendar: Bool = false, _ mutate: () -> Void) {
         mutate()
         let repo = SwiftDataMemoryRepository(modelContext: modelContext)
@@ -280,7 +258,7 @@ struct Tier1OnboardingView: View {
         }
     }
 
-    private func permissionRow(title: String, status: PermissionState, action: @escaping () -> Void) -> some View {
+    private func permissionRow(title: String, status: PermissionState, canRetryWhenDenied: Bool = false, action: @escaping () -> Void) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
@@ -292,14 +270,25 @@ struct Tier1OnboardingView: View {
             if status == .notDetermined {
                 Button("Allow", action: action)
             } else if status == .denied || status == .restricted {
-                Text("Denied")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if canRetryWhenDenied {
+                    Button("Review access", action: action)
+                        .font(.caption.weight(.semibold))
+                } else {
+                    Button("Open Settings") {
+                        openAppSettings()
+                    }
+                    .font(.caption.weight(.semibold))
+                }
             } else {
                 Text("Allowed")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 }

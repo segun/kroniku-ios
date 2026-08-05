@@ -182,17 +182,33 @@ final class Tier1ContextController: ObservableObject {
         consentStore.update { $0.timeSemanticsEnabled = enabled }
     }
 
+    func setVoiceTranscriptionEnabled(_ enabled: Bool) {
+        consentStore.update { $0.voiceTranscriptionEnabled = enabled }
+    }
+
+    func setNoteIngestionEnabled(_ enabled: Bool) {
+        consentStore.update { $0.noteIngestionEnabled = enabled }
+    }
+
+    func setContactsResolutionEnabled(_ enabled: Bool) {
+        consentStore.update { $0.contactsResolutionEnabled = enabled }
+    }
+
+    func setBluetoothContextEnabled(_ enabled: Bool) {
+        consentStore.update { $0.bluetoothContextEnabled = enabled }
+    }
+
     func refreshPermissions() {
         calendarPermission = calendarProvider.authorizationState
         locationPermission = locationProvider.authorizationState
         motionPermission = motionProvider.authorizationState
         let providerHealthState = healthProvider.authorizationState
-        if providerHealthState == .restricted {
-            healthPermission = .restricted
-        } else if consent.healthConsent.enabledMetrics.isEmpty {
-            healthPermission = .notDetermined
+        if providerHealthState == .denied, consent.healthAuthorizationState == .authorized {
+            // HealthKit read permissions can look denied on relaunch for read-only requests.
+            // Preserve the last known authorized state unless a fresh request/probe says otherwise.
+            healthPermission = .authorized
         } else {
-            healthPermission = consent.healthAuthorizationState
+            healthPermission = providerHealthState
         }
         if calendarPermission != .authorized {
             cachedCalendarEventsByDay.removeAll()
@@ -208,16 +224,36 @@ final class Tier1ContextController: ObservableObject {
 
     func requestLocationPermission() async {
         locationPermission = await locationProvider.requestAccess()
+        if locationPermission == .authorized {
+            consentStore.update {
+                $0.locationCaptureEnabled = true
+                $0.weatherSnapshotsEnabled = true
+            }
+        }
     }
 
     func requestMotionPermission() async {
         motionPermission = await motionProvider.requestAccess()
+        if motionPermission == .authorized {
+            consentStore.update {
+                $0.motionAttachmentEnabled = true
+            }
+        }
     }
 
     func requestHealthPermission() async {
-        let nextState = await healthProvider.requestAccess(for: consent.healthConsent.enabledMetrics)
+        let defaultMetrics = Set(Tier1HealthMetric.allCases)
+        let selectedMetrics = consent.healthConsent.enabledMetrics
+        let requestedMetrics = selectedMetrics.isEmpty ? defaultMetrics : selectedMetrics
+
+        let nextState = await healthProvider.requestAccess(for: requestedMetrics)
         healthPermission = nextState
-        consentStore.update { $0.healthAuthorizationState = nextState }
+        consentStore.update {
+            $0.healthAuthorizationState = nextState
+            if nextState == .authorized && $0.healthConsent.enabledMetrics.isEmpty {
+                $0.healthConsent.enabledMetrics = requestedMetrics
+            }
+        }
     }
 
     func applyRetention(into repo: MemoryRepositoryProtocol) async {
@@ -677,6 +713,29 @@ struct HealthKitSummaryProvider: HealthContextProviding {
     var authorizationState: PermissionState {
 #if canImport(HealthKit)
         guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
+        let sampleTypes = Set(Tier1HealthMetric.allCases.compactMap(sampleType(for:)))
+        guard !sampleTypes.isEmpty else { return .notDetermined }
+
+        var sawAuthorized = false
+        var sawDenied = false
+        var sawNotDetermined = false
+
+        for sampleType in sampleTypes {
+            switch store.authorizationStatus(for: sampleType) {
+            case .sharingAuthorized:
+                sawAuthorized = true
+            case .sharingDenied:
+                sawDenied = true
+            case .notDetermined:
+                sawNotDetermined = true
+            @unknown default:
+                sawDenied = true
+            }
+        }
+
+        if sawAuthorized { return .authorized }
+        if sawDenied { return .denied }
+        if sawNotDetermined { return .notDetermined }
         return .notDetermined
 #else
         return .restricted
@@ -691,7 +750,7 @@ struct HealthKitSummaryProvider: HealthContextProviding {
 
         do {
             try await store.requestAuthorization(toShare: [], read: sampleTypes)
-            return .authorized
+            return await probeReadAuthorization(for: sampleTypes)
         } catch {
             print("Health permission request failed: \(error)")
             return .denied
@@ -817,6 +876,40 @@ struct HealthKitSummaryProvider: HealthContextProviding {
                 continuation.resume(returning: totalSeconds / 60)
             }
             store.execute(query)
+        }
+    }
+
+    private func probeReadAuthorization(for sampleTypes: Set<HKSampleType>) async -> PermissionState {
+        guard let sampleType = sampleTypes.first else { return .notDetermined }
+
+        let end = Date()
+        let start = end.addingTimeInterval(-24 * 60 * 60)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HKSample], Error>) in
+                let query = HKSampleQuery(sampleType: sampleType, predicate: predicate, limit: 1, sortDescriptors: nil) { _, samples, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: samples ?? [])
+                    }
+                }
+                store.execute(query)
+            }
+            return .authorized
+        } catch {
+            if let hkError = error as? HKError {
+                switch hkError.code {
+                case .errorAuthorizationDenied:
+                    return .denied
+                case .errorAuthorizationNotDetermined:
+                    return .notDetermined
+                default:
+                    return .restricted
+                }
+            }
+            return .restricted
         }
     }
 #endif

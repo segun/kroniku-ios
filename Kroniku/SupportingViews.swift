@@ -7,7 +7,7 @@ struct PlacesView: View {
                 insightCard(
                     icon: "mappin.and.ellipse",
                     title: "Frequent anchors",
-                    detail: "Kroniku will surface home, work, and recurring places once Tier 1 location consent is enabled."
+                    detail: "Kroniku will surface home, work, and recurring places once location consent is enabled."
                 )
 
                 insightCard(

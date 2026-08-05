@@ -503,6 +503,10 @@ private struct TimelineRow: View {
             chips.append(.init(id: "motion", text: motion.capitalized, icon: motionIcon(for: motion)))
         }
 
+        if let bluetooth = metadataByKey["bluetoothContext"], !bluetooth.isEmpty {
+            chips.append(.init(id: "bluetooth", text: bluetooth.capitalized, icon: bluetoothIcon(for: bluetooth)))
+        }
+
         if let whenLabels = metadataByKey["timeSemantics"], !whenLabels.isEmpty {
             chips.append(.init(id: "when", text: whenLabels.replacingOccurrences(of: ",", with: " · "), icon: "clock.badge.checkmark"))
         }
@@ -520,6 +524,10 @@ private struct TimelineRow: View {
         if !event.photoAttachments.isEmpty {
             let count = event.photoAttachments.count
             chips.append(.init(id: "photos", text: count == 1 ? "1 photo" : "\(count) photos", icon: "photo"))
+        }
+
+        if let score = event.confidenceScore {
+            chips.append(.init(id: "confidence", text: "\(Int((score * 100).rounded()))% confidence", icon: "checkmark.shield"))
         }
 
         var deduped: [ContextChip] = []
@@ -578,6 +586,15 @@ private struct TimelineRow: View {
         if text.contains("overcast") || text.contains("cloud") { return "cloud" }
         if text.contains("clear") || text.contains("sun") { return "sun.max" }
         return "cloud.sun"
+    }
+
+    private func bluetoothIcon(for value: String) -> String {
+        switch value.lowercased() {
+        case "car": return "car"
+        case "headphones": return "headphones"
+        case "speaker": return "hifispeaker"
+        default: return "dot.radiowaves.left.and.right"
+        }
     }
 
     private var rowFill: LinearGradient {

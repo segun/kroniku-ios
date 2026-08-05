@@ -22,11 +22,12 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 /// A small repository wrapper around a SwiftData ModelContext.
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment]) throws
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID]) throws
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws
     func applyRetentionPolicy(for consent: Tier1ConsentState) throws
     func delete(event: MemoryEvent) throws
     func update(event: MemoryEvent) throws
+    func linkEvent(_ eventID: UUID, to linkedEventIDs: [UUID]) throws
 }
 
 final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
@@ -49,7 +50,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = []) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = []) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -61,15 +62,28 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             throw MemoryRepositoryError.invalidInteraction
         }
 
-        let cm = ContactMoment(personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: trimmedNote, captureMethod: captureMethod)
+        let cm = ContactMoment(
+            personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName,
+            interactionType: interaction.rawValue,
+            occurredAt: occurredAt,
+            note: trimmedNote,
+            captureMethod: captureMethod,
+            resolvedContactIdentifier: resolvedContactIdentifier
+        )
+
+        var metadata: [ContextCard.MetadataEntry] = [
+            .init(key: "interactionType", value: interaction.rawValue),
+            .init(key: "captureMethod", value: captureMethod)
+        ]
+        if let bluetoothContext {
+            metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
+        }
+
         let contextCard = ContextCard(
             source: "contactMoment",
             category: "interaction",
             summary: trimmedNote,
-            metadata: [
-                .init(key: "interactionType", value: interaction.rawValue),
-                .init(key: "captureMethod", value: captureMethod)
-            ]
+            metadata: metadata
         )
         let me = MemoryEvent(
             occurredAt: occurredAt,
@@ -80,8 +94,12 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             contextCard: contextCard,
             symbolName: interaction.symbol,
             colorName: "indigo",
+            extractionReview: extractionReview,
             photoAttachments: photoAttachments
         )
+
+        me.linkedEventIDs = linkedEventIDs
+        me.confidenceScore = confidenceScore
 
         apply(enrichment: contextEnrichment, to: me)
 
@@ -174,6 +192,19 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
     }
 
+    func linkEvent(_ eventID: UUID, to linkedEventIDs: [UUID]) throws {
+        let linked = Set(linkedEventIDs.filter { $0 != eventID })
+        guard !linked.isEmpty else { return }
+        let events = fetchAll()
+        guard let target = events.first(where: { $0.id == eventID }) else { return }
+        target.linkedEventIDs = Array(Set(target.linkedEventIDs).union(linked))
+        target.updatedAt = Date()
+        if modelContext.hasChanges {
+            try modelContext.save()
+            NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+        }
+    }
+
     func applyRetentionPolicy(for consent: Tier1ConsentState) throws {
         let events = fetchAll()
         for event in events {
@@ -213,6 +244,19 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
 
             if !consent.photoAttachmentEnabled {
                 event.photoAttachments = []
+            }
+
+            if !consent.voiceTranscriptionEnabled {
+                event.extractionReview = nil
+                scrubMetadata(keys: ["bluetoothContext", "extractedPerson", "extractedInteraction", "transcriptConfidence"], from: event)
+            }
+
+            if !consent.bluetoothContextEnabled {
+                scrubMetadata(keys: ["bluetoothContext"], from: event)
+            }
+
+            if !consent.contactsResolutionEnabled {
+                event.contactMoment?.resolvedContactIdentifier = nil
             }
 
             event.updatedAt = Date()

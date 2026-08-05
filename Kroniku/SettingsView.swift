@@ -1,10 +1,13 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Binding var showsTier1Onboarding: Bool
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openURL) private var openURL
     @EnvironmentObject private var contextController: Tier1ContextController
+    @EnvironmentObject private var tier2Controller: Tier2ContextController
 
     var body: some View {
         NavigationStack {
@@ -26,7 +29,7 @@ struct SettingsView: View {
 
                         if !contextController.consent.hasCompletedOnboarding || contextController.consent.needsOnboardingResume {
                             VStack(alignment: .leading, spacing: 10) {
-                                Text("Tier 1 setup")
+                                Text("Onboarding is not complete")
                                     .font(.headline.weight(.semibold))
                                     .fontDesign(.rounded)
                                 Text("Resume onboarding at any time if you dismissed it before finishing.")
@@ -82,6 +85,28 @@ struct SettingsView: View {
                                 get: { contextController.consent.timeSemanticsEnabled },
                                 set: { contextController.setTimeSemanticsEnabled($0) }
                             ))
+
+                            Divider()
+
+                            Toggle("Enable voice transcription capture", isOn: consentBinding(
+                                get: { contextController.consent.voiceTranscriptionEnabled },
+                                set: { contextController.setVoiceTranscriptionEnabled($0) }
+                            ))
+
+                            Toggle("Enable shared note ingestion", isOn: consentBinding(
+                                get: { contextController.consent.noteIngestionEnabled },
+                                set: { contextController.setNoteIngestionEnabled($0) }
+                            ))
+
+                            Toggle("Enable contacts resolution", isOn: consentBinding(
+                                get: { contextController.consent.contactsResolutionEnabled },
+                                set: { contextController.setContactsResolutionEnabled($0) }
+                            ))
+
+                            Toggle("Enable bluetooth context enrichment", isOn: consentBinding(
+                                get: { contextController.consent.bluetoothContextEnabled },
+                                set: { contextController.setBluetoothContextEnabled($0) }
+                            ))
                         }
                         .kronikuCard(.calendar)
 
@@ -100,13 +125,47 @@ struct SettingsView: View {
                             permissionRow(
                                 title: "HealthKit",
                                 status: contextController.healthPermission,
+                                canRetryWhenDenied: true,
                                 action: { Task { await contextController.requestHealthPermission() } }
                             )
                         }
                         .kronikuCard(.semantics)
 
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Permissions")
+                            Text("Voice, contacts, and bluetooth permissions")
+                                .font(.headline.weight(.semibold))
+                                .fontDesign(.rounded)
+
+                            permissionRow(
+                                title: "Microphone",
+                                status: tier2Controller.microphonePermission,
+                                isBusy: tier2Controller.isRequestingMicrophonePermission,
+                                action: { Task { await tier2Controller.requestMicrophonePermission() } }
+                            )
+
+                            permissionRow(
+                                title: "Speech recognition",
+                                status: tier2Controller.speechPermission,
+                                isBusy: tier2Controller.isRequestingSpeechPermission,
+                                action: { Task { await tier2Controller.requestSpeechPermission() } }
+                            )
+
+                            permissionRow(
+                                title: "Contacts",
+                                status: tier2Controller.contactsPermission,
+                                action: { Task { await tier2Controller.requestContactsPermission() } }
+                            )
+
+                            permissionRow(
+                                title: "Bluetooth",
+                                status: tier2Controller.bluetoothPermission,
+                                action: { Task { await tier2Controller.requestBluetoothPermission() } }
+                            )
+                        }
+                        .kronikuCard(.context)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Calendar, location, motion, and Health permissions")
                                 .font(.headline.weight(.semibold))
                                 .fontDesign(.rounded)
 
@@ -128,6 +187,7 @@ struct SettingsView: View {
                             permissionRow(
                                 title: "HealthKit",
                                 status: contextController.healthPermission,
+                                canRetryWhenDenied: true,
                                 action: { Task { await contextController.requestHealthPermission() } }
                             )
                         }
@@ -156,11 +216,14 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .onAppear { contextController.refreshPermissions() }
+            .onAppear {
+                contextController.refreshPermissions()
+                tier2Controller.refreshPermissions()
+            }
         }
     }
 
-    private func consentBinding(get: @escaping () -> Bool, set: @escaping (Bool) -> Void, syncCalendar: Bool = false) -> Binding<Bool> {
+    private func consentBinding(get: @escaping @Sendable () -> Bool, set: @escaping @Sendable (Bool) -> Void, syncCalendar: Bool = false) -> Binding<Bool> {
         Binding(
             get: get,
             set: { newValue in
@@ -193,7 +256,7 @@ struct SettingsView: View {
         }
     }
 
-    private func permissionRow(title: String, status: PermissionState, action: @escaping () -> Void) -> some View {
+    private func permissionRow(title: String, status: PermissionState, isBusy: Bool = false, canRetryWhenDenied: Bool = false, action: @escaping () -> Void) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
@@ -203,12 +266,28 @@ struct SettingsView: View {
             }
             Spacer()
             if status == .notDetermined {
-                Button("Allow", action: action)
+                Button(isBusy ? "Requesting..." : "Allow", action: action)
+                    .disabled(isBusy)
+            } else if status == .denied || status == .restricted {
+                if canRetryWhenDenied {
+                    Button("Review access", action: action)
+                        .font(.caption.weight(.semibold))
+                } else {
+                    Button("Open Settings") {
+                        openAppSettings()
+                    }
+                    .font(.caption.weight(.semibold))
+                }
             } else {
-                Text(status == .authorized ? "Allowed" : "Denied")
+                Text("Allowed")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        openURL(url)
     }
 }
