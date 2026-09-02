@@ -4,11 +4,16 @@ import PhotosUI
 import UIKit
 
 struct ContactMomentCaptureView: View {
+    private enum FocusField: Hashable {
+        case personName, note, sharedNote, voiceTranscript
+    }
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var contextController: Tier1ContextController
     @EnvironmentObject private var tier2Controller: Tier2ContextController
     @Query(sort: \MemoryEvent.occurredAt, order: .reverse) private var existingEvents: [MemoryEvent]
+    @FocusState private var focusedField: FocusField?
 
     @State private var note = ""
     @State private var sharedNote = ""
@@ -19,6 +24,9 @@ struct ContactMomentCaptureView: View {
     @State private var transcriptionResult: Tier2TranscriptionResult?
     @State private var didApplyVoiceDetails = false
     @State private var resolvedPerson: Tier2ResolvedPerson?
+    @State private var resolutionCandidates: [Tier2ResolvedPerson] = []
+    @State private var isShowingResolutionPicker = false
+    @State private var resolutionStatusMessage: String?
     @State private var capturedBluetoothContext: BluetoothContextKind?
     @State private var linkedEventIDs: Set<UUID> = []
     @State private var voiceErrorMessage: String?
@@ -79,6 +87,7 @@ struct ContactMomentCaptureView: View {
 
                             HStack(spacing: 12) {
                                 Button {
+                                    focusedField = nil
                                     Task {
                                         await toggleVoiceRecording()
                                     }
@@ -134,6 +143,7 @@ struct ContactMomentCaptureView: View {
                                 formField(title: "Who") {
                                     TextField("Person name (optional)", text: $personName)
                                         .textFieldStyle(.plain)
+                                        .focused($focusedField, equals: .personName)
                                         .padding(12)
                                         .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
@@ -142,6 +152,7 @@ struct ContactMomentCaptureView: View {
                                     TextField("e.g. Called Mr. Kroenke about the contract", text: $note, axis: .vertical)
                                         .lineLimit(3...6)
                                         .textFieldStyle(.plain)
+                                        .focused($focusedField, equals: .note)
                                         .padding(12)
                                         .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 }
@@ -150,6 +161,7 @@ struct ContactMomentCaptureView: View {
                                     formField(title: "Shared note") {
                                         TextEditor(text: $sharedNote)
                                             .frame(minHeight: 92)
+                                            .focused($focusedField, equals: .sharedNote)
                                             .padding(6)
                                             .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
@@ -221,6 +233,7 @@ struct ContactMomentCaptureView: View {
                                                 .foregroundStyle(.secondary)
 
                                             Button {
+                                                focusedField = nil
                                                 Task {
                                                     await resolvePersonFromContacts()
                                                 }
@@ -233,8 +246,21 @@ struct ContactMomentCaptureView: View {
                                             .disabled(trimmedPersonName.isEmpty)
 
                                             if let resolvedPerson {
-                                                Text("Matched: \(resolvedPerson.displayName)")
-                                                    .font(.subheadline)
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text("Matched: \(resolvedPerson.displayName)")
+                                                        .font(.subheadline)
+                                                    if let hint = resolvedPerson.disambiguationHint {
+                                                        Text(hint)
+                                                            .font(.caption)
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                }
+                                            }
+
+                                            if let resolutionStatusMessage {
+                                                Text(resolutionStatusMessage)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
                                             }
                                         }
                                     }
@@ -249,14 +275,20 @@ struct ContactMomentCaptureView: View {
             }
             .navigationTitle("Contact moment")
             .navigationBarTitleDisplayMode(.inline)
+            .scrollDismissesKeyboard(.interactively)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { focusedField = nil; dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        focusedField = nil
                         Task { await saveContactMoment() }
                     }
                         .fontWeight(.semibold)
                         .disabled(!canSave || isSaving)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
                 }
             }
         }
@@ -283,6 +315,32 @@ struct ContactMomentCaptureView: View {
                 await loadPhotoAttachments(from: newItems)
             }
         }
+        .onChange(of: personName) { _, _ in
+            resolvedPerson = nil
+            resolutionCandidates = []
+            isShowingResolutionPicker = false
+            resolutionStatusMessage = nil
+        }
+        .confirmationDialog(
+            "Choose contact",
+            isPresented: $isShowingResolutionPicker,
+            titleVisibility: .visible
+        ) {
+            ForEach(resolutionCandidates, id: \.identifier) { candidate in
+                Button {
+                    applyResolvedPerson(candidate)
+                } label: {
+                    if let hint = candidate.disambiguationHint, !hint.isEmpty {
+                        Text("\(candidate.displayName) - \(hint)")
+                    } else {
+                        Text(candidate.displayName)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                resolutionStatusMessage = "No contact selected."
+            }
+        }
         .onDisappear {
             if isListening {
                 Task {
@@ -303,12 +361,14 @@ struct ContactMomentCaptureView: View {
             if !voiceTranscript.isEmpty {
                 TextEditor(text: $voiceTranscript)
                     .frame(minHeight: 88)
+                    .focused($focusedField, equals: .voiceTranscript)
                     .padding(6)
                     .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .disabled(isListening)
 
                 if !isListening {
                     Button {
+                        focusedField = nil
                         Task {
                             if await extractFromTranscript() {
                                 didApplyVoiceDetails = true
@@ -520,16 +580,48 @@ struct ContactMomentCaptureView: View {
     private func resolvePersonFromContacts() async {
         guard contextController.consent.contactsResolutionEnabled else { return }
 
+        resolvedPerson = nil
+        resolutionCandidates = []
+        isShowingResolutionPicker = false
+        let lookupName = trimmedPersonName
+        guard !lookupName.isEmpty else {
+            resolutionStatusMessage = nil
+            return
+        }
+
+        guard lookupName.count >= 2 else {
+            resolutionStatusMessage = "Type at least 2 characters to resolve a contact."
+            return
+        }
+
         if tier2Controller.contactsPermission == .notDetermined {
             await tier2Controller.requestContactsPermission()
         }
         guard tier2Controller.contactsPermission == .authorized else {
+            resolutionStatusMessage = "Contacts permission is required to resolve people."
             return
         }
-        resolvedPerson = await tier2Controller.resolvePerson(named: trimmedPersonName)
-        if let resolvedPerson {
-            personName = resolvedPerson.displayName
+
+        let matches = await tier2Controller.resolvePeople(named: lookupName, limit: 5)
+        if matches.isEmpty {
+            resolutionStatusMessage = "No close contact match found."
+            return
         }
+
+        if matches.count == 1, let only = matches.first {
+            applyResolvedPerson(only)
+            return
+        }
+
+        resolutionCandidates = matches
+        isShowingResolutionPicker = true
+        resolutionStatusMessage = "Multiple close matches found. Choose one."
+    }
+
+    private func applyResolvedPerson(_ person: Tier2ResolvedPerson) {
+        resolvedPerson = person
+        personName = person.displayName
+        resolutionStatusMessage = "Resolved from your contacts."
     }
 }
 

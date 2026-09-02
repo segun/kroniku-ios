@@ -4,10 +4,15 @@ import PhotosUI
 import UIKit
 
 struct ContactMomentDetailView: View {
+    private enum FocusField: Hashable {
+        case personName, note
+    }
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var contextController: Tier1ContextController
     @Query(sort: \MemoryEvent.occurredAt, order: .reverse) private var allEvents: [MemoryEvent]
+    @FocusState private var focusedField: FocusField?
 
     let event: MemoryEvent
 
@@ -124,11 +129,13 @@ struct ContactMomentDetailView: View {
         }
         .navigationTitle("Contact moment")
         .navigationBarTitleDisplayMode(.inline)
+        .scrollDismissesKeyboard(.interactively)
         .toolbar {
             if !event.isReadOnlySource {
                 ToolbarItem(placement: .confirmationAction) {
                     if isEditing {
                         Button("Save") {
+                            focusedField = nil
                             saveChanges()
                             isEditing = false
                         }
@@ -145,10 +152,16 @@ struct ContactMomentDetailView: View {
                 if isEditing {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") {
+                            focusedField = nil
                             reloadFromEvent()
                             isEditing = false
                         }
                     }
+                }
+
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
                 }
             }
         }
@@ -301,6 +314,7 @@ struct ContactMomentDetailView: View {
             fieldBlock(title: "Who") {
                 TextField("Person name", text: $personName)
                     .textFieldStyle(.plain)
+                    .focused($focusedField, equals: .personName)
                     .padding(12)
                     .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
@@ -308,6 +322,7 @@ struct ContactMomentDetailView: View {
             fieldBlock(title: "Note") {
                 TextEditor(text: $note)
                     .frame(minHeight: 130)
+                    .focused($focusedField, equals: .note)
                     .padding(6)
                     .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }

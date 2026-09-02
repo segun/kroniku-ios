@@ -35,6 +35,7 @@ protocol ContactsContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess() async -> PermissionState
     func resolvePerson(named personName: String) async -> Tier2ResolvedPerson?
+    func resolvePeople(named personName: String, limit: Int) async -> [Tier2ResolvedPerson]
 }
 
 @MainActor
@@ -47,6 +48,7 @@ protocol BluetoothContextProviding {
 struct Tier2ResolvedPerson: Hashable {
     var identifier: String
     var displayName: String
+    var disambiguationHint: String?
 }
 
 struct Tier2TranscriptionResult: Hashable {
@@ -166,6 +168,16 @@ final class Tier2ContextController: ObservableObject {
             return nil
         }
         return await contactsProvider.resolvePerson(named: personName)
+    }
+
+    func resolvePeople(named personName: String, limit: Int = 5) async -> [Tier2ResolvedPerson] {
+        guard !personName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        guard contactsPermission == .authorized else {
+            return []
+        }
+        return await contactsProvider.resolvePeople(named: personName, limit: max(1, limit))
     }
 
     func captureBluetoothContext() async -> BluetoothContextKind? {
@@ -398,30 +410,62 @@ final class NativeVoiceProvider: NSObject, VoiceContextProviding, @unchecked Sen
     }
 
     private func inferPerson(from text: String) -> String? {
-        let tokens = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-        guard !tokens.isEmpty else { return nil }
+        let rawTokens = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard !rawTokens.isEmpty else { return nil }
 
-        for idx in tokens.indices {
-            let token = String(tokens[idx])
-            if ["met", "called", "texted", "with", "to"].contains(token.lowercased()) {
-                let nextIndex = tokens.index(after: idx)
-                guard nextIndex < tokens.endIndex else { continue }
-                let candidate = String(tokens[nextIndex]).trimmingCharacters(in: .punctuationCharacters)
-                if candidate.count >= 2,
-                   let first = candidate.first,
-                   first.isUppercase {
-                    return candidate
+        let anchorTokens: Set<String> = ["met", "called", "texted", "with", "to"]
+        let stopTokens: Set<String> = ["on", "about", "for", "at", "in", "during", "regarding"]
+        let honorifics: Set<String> = ["mr", "mrs", "ms", "miss", "dr", "prof", "sir", "madam", "mx"]
+
+        func isLikelyNameToken(_ token: String) -> Bool {
+            guard token.count >= 2, let first = token.first else { return false }
+            return first.isUppercase
+        }
+
+        for (index, token) in rawTokens.enumerated() {
+            guard anchorTokens.contains(token.lowercased()) else { continue }
+
+            var cursor = index + 1
+            while cursor < rawTokens.count && honorifics.contains(rawTokens[cursor].lowercased()) {
+                cursor += 1
+            }
+
+            var picked: [String] = []
+            while cursor < rawTokens.count {
+                let candidate = rawTokens[cursor]
+                let lowered = candidate.lowercased()
+                if stopTokens.contains(lowered) {
+                    break
                 }
+                guard isLikelyNameToken(candidate), !honorifics.contains(lowered) else {
+                    break
+                }
+                picked.append(candidate)
+                cursor += 1
+            }
+
+            if !picked.isEmpty {
+                return picked.joined(separator: " ")
             }
         }
 
-        let firstCapitalized = tokens
-            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
-            .first(where: {
-                guard let first = $0.first else { return false }
-                return first.isUppercase && $0.count > 1
-            })
-        return firstCapitalized
+        // Fallback: find first run of likely name tokens and drop honorifics.
+        var fallback: [String] = []
+        for token in rawTokens {
+            let lowered = token.lowercased()
+            if honorifics.contains(lowered) {
+                if fallback.isEmpty { continue }
+                break
+            }
+            if isLikelyNameToken(token) {
+                fallback.append(token)
+            } else if !fallback.isEmpty {
+                break
+            }
+        }
+        return fallback.isEmpty ? nil : fallback.joined(separator: " ")
     }
 
     private func inferDate(from text: String) -> Date? {
@@ -437,6 +481,9 @@ final class NativeVoiceProvider: NSObject, VoiceContextProviding, @unchecked Sen
 
 @MainActor
 final class ContactsDirectoryProvider: ContactsContextProviding {
+    nonisolated private static let honorificTokens: Set<String> = [
+        "mr", "mrs", "ms", "miss", "dr", "prof", "sir", "madam", "mx"
+    ]
 
     var authorizationState: PermissionState {
         switch CNContactStore.authorizationStatus(for: .contacts) {
@@ -459,53 +506,144 @@ final class ContactsDirectoryProvider: ContactsContextProviding {
     }
 
     func resolvePerson(named personName: String) async -> Tier2ResolvedPerson? {
+        let matches = await resolvePeople(named: personName, limit: 1)
+        return matches.first
+    }
+
+    func resolvePeople(named personName: String, limit: Int) async -> [Tier2ResolvedPerson] {
         let name = personName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return nil }
+        guard !name.isEmpty else { return [] }
+        let resultLimit = max(1, limit)
 
         return await Task.detached(priority: .userInitiated) {
-            Self.resolvePersonSync(named: name)
+            Self.resolvePeopleSync(named: name, limit: resultLimit)
         }.value
     }
 
-    nonisolated private static func resolvePersonSync(named name: String) -> Tier2ResolvedPerson? {
+    nonisolated private static func resolvePeopleSync(named name: String, limit: Int) -> [Tier2ResolvedPerson] {
         let store = CNContactStore()
-        let keys: [CNKeyDescriptor] = [CNContactGivenNameKey as CNKeyDescriptor, CNContactFamilyNameKey as CNKeyDescriptor, CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]
+        let keys: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactOrganizationNameKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+            CNContactFormatter.descriptorForRequiredKeys(for: .fullName)
+        ]
         let request = CNContactFetchRequest(keysToFetch: keys)
-        var best: (identifier: String, displayName: String, score: Int)?
+        var matches: [(identifier: String, displayName: String, disambiguationHint: String?, score: Int)] = []
 
         do {
-            try store.enumerateContacts(with: request) { contact, stop in
+            try store.enumerateContacts(with: request) { contact, _ in
                 let full = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
                 let score = matchScore(personName: name, candidate: full)
                 if score == 0 { return }
                 let display = full.isEmpty ? name : full
-                if let existing = best {
-                    if score > existing.score {
-                        best = (contact.identifier, display, score)
-                    }
-                } else {
-                    best = (contact.identifier, display, score)
-                }
-                if score >= 100 {
-                    stop.pointee = true
-                }
+                let hint = buildDisambiguationHint(for: contact)
+                matches.append((contact.identifier, display, hint, score))
             }
         } catch {
             print("Contact resolution failed: \(error)")
-            return nil
+            return []
         }
 
-        guard let match = best else { return nil }
-        return Tier2ResolvedPerson(identifier: match.identifier, displayName: match.displayName)
+        let ranked = matches
+            .sorted {
+                if $0.score != $1.score { return $0.score > $1.score }
+                return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+
+        var unique: [Tier2ResolvedPerson] = []
+        var seen = Set<String>()
+        for entry in ranked where unique.count < limit {
+            guard !seen.contains(entry.identifier) else { continue }
+            seen.insert(entry.identifier)
+            unique.append(Tier2ResolvedPerson(identifier: entry.identifier, displayName: entry.displayName, disambiguationHint: entry.disambiguationHint))
+        }
+
+        return unique
+    }
+
+    nonisolated private static func buildDisambiguationHint(for contact: CNContact) -> String? {
+        let organization = contact.organizationName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !organization.isEmpty { return organization }
+
+        if let phone = contact.phoneNumbers.first?.value.stringValue {
+            let digits = phone.filter(\ .isNumber)
+            if digits.count >= 4 {
+                return "phone ••••\(digits.suffix(4))"
+            }
+        }
+
+        if let email = contact.emailAddresses.first?.value as String? {
+            let cleaned = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleaned.isEmpty { return cleaned }
+        }
+
+        return nil
     }
 
     nonisolated private static func matchScore(personName: String, candidate: String) -> Int {
-        let lhs = personName.lowercased()
-        let rhs = candidate.lowercased()
-        if lhs == rhs { return 100 }
-        if rhs.hasPrefix(lhs) || lhs.hasPrefix(rhs) { return 80 }
-        if rhs.contains(lhs) || lhs.contains(rhs) { return 60 }
+        let query = normalizedTokens(from: personName)
+        let target = normalizedTokens(from: candidate)
+
+        guard !query.full.isEmpty, !target.full.isEmpty else { return 0 }
+
+        if query.full == target.full { return 120 }
+
+        if query.full == target.given || query.full == target.family {
+            return 110
+        }
+
+        // Require at least 3 chars for prefix matching to avoid noisy matches.
+        if query.full.count >= 3 {
+            if target.tokens.contains(where: { $0.hasPrefix(query.full) }) {
+                return 92
+            }
+            if target.full.hasPrefix(query.full) {
+                return 90
+            }
+        }
+
+        if query.tokens.count >= 2 {
+            let allQueryTokensMatch = query.tokens.allSatisfy { token in
+                token.count >= 2 && target.tokens.contains(where: { $0.hasPrefix(token) || $0 == token })
+            }
+            if allQueryTokensMatch {
+                return 100
+            }
+        }
+
         return 0
+    }
+
+    nonisolated private static func normalizedTokens(from raw: String) -> (
+        full: String,
+        given: String,
+        family: String,
+        tokens: [String]
+    ) {
+        let lowered = raw
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let compact = lowered
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let parts = compact
+            .split(separator: " ")
+            .map(String.init)
+            .filter { token in
+                !honorificTokens.contains(token) && token.count >= 2
+            }
+        let normalized = parts.joined(separator: " ")
+        return (
+            full: normalized,
+            given: parts.first ?? "",
+            family: parts.dropFirst().joined(separator: " "),
+            tokens: parts
+        )
     }
 }
 
