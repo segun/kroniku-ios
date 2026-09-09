@@ -264,7 +264,7 @@ final class Tier1ContextController: ObservableObject {
         }
     }
 
-    func syncCalendarEvents(into repo: MemoryRepositoryProtocol, for day: Date = Date()) async {
+    func syncCalendarEvents(into repo: MemoryRepositoryProtocol, for day: Date = Date(), forceRefresh: Bool = false) async {
         guard consent.calendarImportEnabled else { return }
         guard calendarPermission == .authorized else { return }
 
@@ -273,7 +273,7 @@ final class Tier1ContextController: ObservableObject {
         let startOfNextDay = calendar.date(byAdding: .day, value: 1, to: startOfSelectedDay) ?? startOfSelectedDay.addingTimeInterval(24 * 60 * 60)
         let interval = DateInterval(start: startOfSelectedDay, end: startOfNextDay)
         do {
-            var imported = try await rawCalendarEvents(in: interval, for: startOfSelectedDay)
+            var imported = try await rawCalendarEvents(in: interval, for: startOfSelectedDay, forceRefresh: forceRefresh)
             if consent.timeSemanticsEnabled {
                 imported = imported.map {
                     var event = $0
@@ -305,8 +305,8 @@ final class Tier1ContextController: ObservableObject {
         }
     }
 
-    private func rawCalendarEvents(in interval: DateInterval, for dayKey: Date) async throws -> [TimelineCalendarImportEvent] {
-        if let cached = cachedCalendarEventsByDay[dayKey], shouldReuseCalendarCache(cached, for: dayKey) {
+    private func rawCalendarEvents(in interval: DateInterval, for dayKey: Date, forceRefresh: Bool = false) async throws -> [TimelineCalendarImportEvent] {
+        if !forceRefresh, let cached = cachedCalendarEventsByDay[dayKey], shouldReuseCalendarCache(cached, for: dayKey) {
             return cached.events
         }
 

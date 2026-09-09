@@ -163,4 +163,39 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
             }
         }
     }
+
+    func fetchUnsyncedEvents() -> [MemoryEvent] {
+        events.filter { !$0.isReadOnlySource && !$0.isDeleted && $0.syncedToBackendAt == nil }
+    }
+
+    func markSynced(eventId: String, version: Int, syncedAt: Date) throws {
+        guard let event = events.first(where: { $0.id.uuidString == eventId || $0.backendEventId == eventId }) else { return }
+        event.backendEventId = eventId
+        event.backendVersion = version
+        event.syncedToBackendAt = syncedAt
+    }
+
+    func applyConflict(eventId: String, serverVersion: Int, strategy: String) throws {
+        guard let event = events.first(where: { $0.id.uuidString == eventId || $0.backendEventId == eventId }) else { return }
+        event.backendVersion = serverVersion
+        if strategy.lowercased().contains("server") {
+            event.syncedToBackendAt = Date()
+        }
+    }
+
+    func mergePulledEvents(_ events: [PullEventResponse]) throws {
+        for remote in events {
+            if let local = self.events.first(where: { $0.backendEventId == remote.eventId }) {
+                local.backendVersion = remote.version
+                local.updatedAt = remote.updatedAt
+                local.isDeleted = remote.isDeleted
+            } else {
+                self.events.append(MemoryEvent(occurredAt: remote.occurredAt, source: remote.source, title: remote.title, detail: remote.detail, context: remote.searchText, backendEventId: remote.eventId, backendVersion: remote.version, syncedToBackendAt: remote.updatedAt, payloadHash: remote.payloadHash, encryptedPayload: remote.encryptedPayload, isDeleted: remote.isDeleted))
+            }
+        }
+    }
+
+    func makePushRequest(for event: MemoryEvent) -> PushEventRequest {
+        PushEventRequest(eventId: event.backendEventId ?? event.id.uuidString, version: max(event.backendVersion, 1), occurredAt: event.occurredAt ?? event.updatedAt, source: event.source ?? "unknown", title: event.title, detail: event.detail, searchText: event.context, encryptedPayload: event.encryptedPayload ?? "", payloadHash: event.payloadHash ?? "", isDeleted: event.isDeleted)
+    }
 }

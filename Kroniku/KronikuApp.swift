@@ -32,7 +32,7 @@ struct KronikuApp: App {
 
     private func checkAuthStatus() {
         // Check if user has a valid access token
-        if let _ = try? authService.getAccessToken() {
+        if authService.isAuthenticated {
             isAuthenticated = true
         } else {
             isAuthenticated = false

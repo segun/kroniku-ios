@@ -115,6 +115,8 @@ struct TimelineView: View {
     @State private var showsHiddenEvents = false
     @State private var selectedEvent: MemoryEvent?
     @State private var actionEvent: MemoryEvent?
+    @State private var isRefreshing = false
+    @State private var refreshStatus: String?
 
     private let calendar = Calendar.current
 
@@ -287,6 +289,9 @@ struct TimelineView: View {
                 }
                 .kronikuCard(.context)
             }
+            .refreshable {
+                await refreshTimeline()
+            }
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $selectedEvent) { event in
                 ContactMomentDetailView(event: event)
@@ -322,6 +327,28 @@ struct TimelineView: View {
                     }
                     .accessibilityLabel("Add a memory")
                 }
+            }
+        }
+        .overlay(alignment: .top) {
+            if isRefreshing || refreshStatus != nil {
+                HStack(spacing: 9) {
+                    if isRefreshing {
+                        ProgressView()
+                            .tint(KronikuPalette.paper)
+                    } else {
+                        Image(systemName: "exclamationmark.circle")
+                    }
+                    Text("")
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(KronikuPalette.paper)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(KronikuPalette.night.opacity(0.92), in: Capsule())
+                .shadow(color: .black.opacity(0.14), radius: 8, y: 4)
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .allowsHitTesting(false)
             }
         }
         .onAppear {
@@ -486,10 +513,42 @@ struct TimelineView: View {
         .padding(.vertical, 8)
     }
 
-    private func refreshCalendarEvents() async {
+    private func refreshCalendarEvents(forceRefresh: Bool = false) async {
         let repo = SwiftDataMemoryRepository(modelContext: modelContext)
-        await contextController.syncCalendarEvents(into: repo, for: selectedDate)
+        await contextController.syncCalendarEvents(into: repo, for: selectedDate, forceRefresh: forceRefresh)
         loadEvents()
+    }
+
+    private func refreshTimeline() async {
+        guard !isRefreshing else { return }
+
+        await MainActor.run {
+            refreshStatus = nil
+            withAnimation(.easeOut(duration: 0.18)) {
+                isRefreshing = true
+            }
+        }
+
+        let repository = SwiftDataMemoryRepository(modelContext: modelContext)
+        let coordinator = SyncCoordinator(repository: repository)
+
+        do {
+            try await coordinator.performFullSync()
+            await refreshCalendarEvents(forceRefresh: true)
+            await MainActor.run {
+                withAnimation(.easeIn(duration: 0.18)) {
+                    isRefreshing = false
+                }
+            }
+        } catch {
+            print("Timeline refresh failed: \(error.localizedDescription)")
+            await MainActor.run {
+                refreshStatus = "Sync failed"
+                withAnimation(.easeIn(duration: 0.18)) {
+                    isRefreshing = false
+                }
+            }
+        }
     }
 }
 

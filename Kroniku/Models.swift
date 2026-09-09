@@ -213,6 +213,12 @@ final class MemoryEvent: Identifiable {
     var updatedAt: Date = Date()
     var linkedEventIDs: [UUID] = []
     var confidenceScore: Double?
+    var backendEventId: String?
+    var backendVersion: Int = 0
+    var syncedToBackendAt: Date?
+    var payloadHash: String?
+    var encryptedPayload: String?
+    var isDeleted: Bool = false
 
     @Relationship(inverse: \ContactMoment.memoryEvent) var contactMoment: ContactMoment?
     var place: Place?
@@ -221,7 +227,7 @@ final class MemoryEvent: Identifiable {
     var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.occurredAt = occurredAt
@@ -239,6 +245,12 @@ final class MemoryEvent: Identifiable {
         self.photoAttachments = photoAttachments
         self.linkedEventIDs = linkedEventIDs
         self.confidenceScore = confidenceScore
+        self.backendEventId = backendEventId
+        self.backendVersion = backendVersion
+        self.syncedToBackendAt = syncedToBackendAt
+        self.payloadHash = payloadHash
+        self.encryptedPayload = encryptedPayload
+        self.isDeleted = isDeleted
     }
 }
 

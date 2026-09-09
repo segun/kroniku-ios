@@ -116,7 +116,10 @@ final class AuthService: @unchecked Sendable {
 
     /// Checks if user is currently authenticated
     var isAuthenticated: Bool {
-        (try? getAccessToken()) != nil
+        guard let token = try? getAccessToken(), !token.isEmpty else {
+            return false
+        }
+        return true
     }
 
     // MARK: - Helpers

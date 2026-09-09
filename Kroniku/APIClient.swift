@@ -1,5 +1,9 @@
 import Foundation
 
+extension Notification.Name {
+    static let authSessionExpired = Notification.Name("authSessionExpired")
+}
+
 /// Centralized HTTP client with JWT handling, error parsing, and request/response logging
 final class APIClient: @unchecked Sendable {
     static let shared = APIClient()
@@ -42,7 +46,12 @@ final class APIClient: @unchecked Sendable {
 
     /// Performs a GET request
     func get<T: Decodable>(_ path: String) async throws -> T {
-        try await request(path: path, method: "GET", body: nil)
+        try await get(path, queryItems: [])
+    }
+
+    /// Performs a GET request with URL-encoded query parameters.
+    func get<T: Decodable>(_ path: String, queryItems: [URLQueryItem]) async throws -> T {
+        try await request(path: path, method: "GET", body: nil, queryItems: queryItems)
     }
 
     /// Performs a POST request with an Encodable body
@@ -80,9 +89,17 @@ final class APIClient: @unchecked Sendable {
     private func request<T: Decodable>(
         path: String,
         method: String,
-        body: Data?
+        body: Data?,
+        queryItems: [URLQueryItem] = []
     ) async throws -> T {
-        let url = baseURL.appendingPathComponent(path)
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent(path),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components?.url else {
+            throw HTTPError.unknownError(message: "Invalid request URL")
+        }
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -97,7 +114,20 @@ final class APIClient: @unchecked Sendable {
 
         logRequest(urlRequest)
 
-        let (data, urlResponse) = try await session.data(for: urlRequest)
+        let data: Data
+        let urlResponse: URLResponse
+        do {
+            (data, urlResponse) = try await session.data(for: urlRequest)
+        } catch is CancellationError {
+            print("🛑 [CANCELLED] [\(method)] \(url) request task was cancelled before a response")
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            print("🛑 [CANCELLED] [\(method)] \(url) URLSession cancelled the request")
+            throw error
+        } catch {
+            print("🌐 [NETWORK ERROR] [\(method)] \(url) \(error.localizedDescription)")
+            throw error
+        }
 
         guard let httpResponse = urlResponse as? HTTPURLResponse else {
             throw HTTPError.unknownError(message: "Invalid response type")
@@ -138,6 +168,7 @@ final class APIClient: @unchecked Sendable {
                     throw HTTPError.validationError(messages: [message])
                 }
             case 401:
+                NotificationCenter.default.post(name: .authSessionExpired, object: nil)
                 throw HTTPError.unauthorized(message: message)
             case 403:
                 throw HTTPError.forbidden(message: message)

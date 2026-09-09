@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SwiftData
 
 extension Notification.Name {
@@ -28,6 +29,11 @@ protocol MemoryRepositoryProtocol {
     func delete(event: MemoryEvent) throws
     func update(event: MemoryEvent) throws
     func linkEvent(_ eventID: UUID, to linkedEventIDs: [UUID]) throws
+    func fetchUnsyncedEvents() -> [MemoryEvent]
+    func markSynced(eventId: String, version: Int, syncedAt: Date) throws
+    func applyConflict(eventId: String, serverVersion: Int, strategy: String) throws
+    func mergePulledEvents(_ events: [PullEventResponse]) throws
+    func makePushRequest(for event: MemoryEvent) -> PushEventRequest
 }
 
 final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
@@ -43,7 +49,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
 
     func fetchAll() -> [MemoryEvent] {
         do {
-            return try modelContext.fetch(fetchDescriptor)
+            return try modelContext.fetch(fetchDescriptor).filter { !$0.isDeleted }
         } catch {
             print("Repository fetch failed: \(error)")
             return []
@@ -178,10 +184,13 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
     }
 
     func delete(event: MemoryEvent) throws {
-        if let cm = event.contactMoment {
-            modelContext.delete(cm)
+        if event.source == "calendar" {
+            modelContext.delete(event)
+        } else {
+            event.isDeleted = true
+            event.updatedAt = Date()
+            event.syncedToBackendAt = nil
         }
-        modelContext.delete(event)
         try modelContext.save()
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
     }
@@ -266,6 +275,101 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             try modelContext.save()
             NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
         }
+    }
+
+    func fetchUnsyncedEvents() -> [MemoryEvent] {
+        fetchStoredEvents().filter { !$0.isReadOnlySource && $0.syncedToBackendAt == nil }
+    }
+
+    func markSynced(eventId: String, version: Int, syncedAt: Date) throws {
+        guard let event = findStoredEvent(eventId: eventId) else { return }
+        event.backendEventId = eventId
+        event.backendVersion = version
+        event.syncedToBackendAt = syncedAt
+        try modelContext.save()
+        NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+    }
+
+    func applyConflict(eventId: String, serverVersion: Int, strategy: String) throws {
+        guard let event = findStoredEvent(eventId: eventId) else { return }
+        print("Sync conflict for \(eventId): strategy=\(strategy), serverVersion=\(serverVersion)")
+        event.backendEventId = eventId
+        if strategy.lowercased().contains("server") {
+            event.backendVersion = serverVersion
+            event.syncedToBackendAt = Date()
+        } else {
+            event.backendVersion = max(event.backendVersion, serverVersion)
+            event.syncedToBackendAt = nil
+        }
+        try modelContext.save()
+    }
+
+    func mergePulledEvents(_ events: [PullEventResponse]) throws {
+        var changed = false
+        for remote in events {
+            guard let local = findStoredEvent(eventId: remote.eventId) else {
+                modelContext.insert(makeLocalEvent(from: remote))
+                changed = true
+                continue
+            }
+
+            guard remote.version >= local.backendVersion else { continue }
+            guard remote.updatedAt >= local.updatedAt || local.syncedToBackendAt != nil else { continue }
+            apply(remote, to: local)
+            changed = true
+        }
+
+        guard changed else { return }
+        try modelContext.save()
+        NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+    }
+
+    func makePushRequest(for event: MemoryEvent) -> PushEventRequest {
+        let payload = event.encryptedPayload ?? event.defaultEncryptedPayload
+        let hash = event.payloadHash ?? event.defaultPayloadHash
+        return PushEventRequest(
+            eventId: event.backendEventId ?? event.id.uuidString,
+            version: max(event.backendVersion, 1),
+            occurredAt: event.occurredAt ?? event.updatedAt,
+            source: event.source ?? "unknown",
+            title: event.title,
+            detail: event.detail,
+            searchText: event.context,
+            encryptedPayload: payload,
+            payloadHash: hash,
+            isDeleted: event.isDeleted
+        )
+    }
+
+    private func fetchStoredEvents() -> [MemoryEvent] {
+        (try? modelContext.fetch(FetchDescriptor<MemoryEvent>())) ?? []
+    }
+
+    private func findStoredEvent(eventId: String) -> MemoryEvent? {
+        fetchStoredEvents().first { $0.backendEventId == eventId || $0.id.uuidString == eventId }
+    }
+
+    private func makeLocalEvent(from remote: PullEventResponse) -> MemoryEvent {
+        let event = MemoryEvent(occurredAt: remote.occurredAt, source: remote.source, title: remote.title, detail: remote.detail, context: remote.searchText, backendEventId: remote.eventId, backendVersion: remote.version, syncedToBackendAt: remote.updatedAt, payloadHash: remote.payloadHash, encryptedPayload: remote.encryptedPayload, isDeleted: remote.isDeleted)
+        event.createdAt = remote.createdAt
+        event.updatedAt = remote.updatedAt
+        return event
+    }
+
+    private func apply(_ remote: PullEventResponse, to event: MemoryEvent) {
+        event.backendEventId = remote.eventId
+        event.backendVersion = remote.version
+        event.occurredAt = remote.occurredAt
+        event.source = remote.source
+        event.title = remote.title
+        event.detail = remote.detail
+        event.context = remote.searchText
+        event.payloadHash = remote.payloadHash
+        event.encryptedPayload = remote.encryptedPayload
+        event.isDeleted = remote.isDeleted
+        event.createdAt = remote.createdAt
+        event.updatedAt = remote.updatedAt
+        event.syncedToBackendAt = remote.updatedAt
     }
 
     private func apply(enrichment: ContextEnrichment?, to event: MemoryEvent) {
@@ -419,5 +523,34 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
 
         return hasChanges
+    }
+}
+
+private struct LocalSyncPayload: Codable {
+    let occurredAt: Date?
+    let source: String?
+    let title: String?
+    let detail: String?
+    let context: String?
+}
+
+private extension MemoryEvent {
+    var defaultEncryptedPayload: String {
+        let payload = LocalSyncPayload(occurredAt: occurredAt, source: source, title: title, detail: detail, context: context)
+        guard let data = try? JSONEncoder.iso8601.encode(payload) else { return "" }
+        return data.base64EncodedString()
+    }
+
+    var defaultPayloadHash: String {
+        let data = Data(defaultEncryptedPayload.utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private extension JSONEncoder {
+    static var iso8601: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
     }
 }
