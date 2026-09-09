@@ -19,35 +19,62 @@ final class AuthService: @unchecked Sendable {
         try await apiClient.get("/")
     }
 
+    // MARK: - Device Identity
+
+    /// Returns a stable device identifier for this app install and persists it to Keychain.
+    func getOrCreateClientDeviceId() throws -> String {
+        if let existing = try keychain.retrieve(.clientDeviceId), !existing.isEmpty {
+            return existing
+        }
+
+        let newIdentifier = "ios-\(UUID().uuidString.prefix(8))"
+        try keychain.store(String(newIdentifier), for: .clientDeviceId)
+        return String(newIdentifier)
+    }
+
+    /// Returns a stable device public key for provider auth, generating one on first use if missing.
+    func getOrCreateDevicePublicKey() throws -> String {
+        if let existing = try keychain.retrieve(.devicePublicKey), !existing.isEmpty {
+            return existing
+        }
+
+        let randomBytes = (0..<32).map { _ in UInt8.random(in: UInt8.min...UInt8.max) }
+        let publicKey = Data(randomBytes).base64EncodedString()
+        try keychain.store(publicKey, for: .devicePublicKey)
+        return publicKey
+    }
+
     // MARK: - Provider Login
 
     /// Logs in or registers using a provider (Google or Apple) OpenID Connect ID token
     func loginWithProvider(
         provider: String, // "google" or "apple"
         idToken: String,
-        clientDeviceId: String,
+        clientDeviceId: String? = nil,
         platform: String = "ios",
         appVersion: String,
         publicKey: String? = nil
     ) async throws -> (response: ProviderAuthResponse, isNewAccount: Bool) {
+        let resolvedClientDeviceId = try clientDeviceId ?? getOrCreateClientDeviceId()
+        let resolvedPublicKey = try publicKey ?? getOrCreateDevicePublicKey()
+
         let request = ProviderLoginRequest(
             provider: provider,
             idToken: idToken,
-            clientDeviceId: clientDeviceId,
+            clientDeviceId: resolvedClientDeviceId,
             platform: platform,
             appVersion: appVersion,
-            publicKey: publicKey
+            publicKey: resolvedPublicKey
         )
 
         let response: ProviderAuthResponse = try await apiClient.post("/auth/provider", body: request)
-        
-        // Save the auth response
+
         let basicResponse = AuthResponse(
             accessToken: response.accessToken,
             user: response.user,
             device: response.device
         )
-        try saveAuthResponse(basicResponse, clientDeviceId: clientDeviceId)
+        try saveAuthResponse(basicResponse, clientDeviceId: resolvedClientDeviceId)
 
         return (response, response.isNewAccount)
     }
@@ -82,14 +109,19 @@ final class AuthService: @unchecked Sendable {
         return value == "true"
     }
 
+    /// Returns the stored server-managed device identifier if present.
+    func getDeviceId() throws -> String? {
+        try keychain.retrieve(.deviceId)
+    }
+
     /// Checks if user is currently authenticated
     var isAuthenticated: Bool {
         (try? getAccessToken()) != nil
     }
 
-    // MARK: - Private Helpers
+    // MARK: - Helpers
 
-    private func saveAuthResponse(_ response: AuthResponse, clientDeviceId: String) throws {
+    func saveAuthResponse(_ response: AuthResponse, clientDeviceId: String) throws {
         try keychain.store(response.accessToken, for: .accessToken)
         try keychain.store(response.user.id, for: .userId)
         try keychain.store(response.user.email, for: .userEmail)

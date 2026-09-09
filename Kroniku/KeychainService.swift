@@ -13,6 +13,7 @@ final class KeychainService: @unchecked Sendable {
         case userId = "userId"
         case userEmail = "userEmail"
         case retrievalOptIn = "retrievalOptIn"
+        case devicePublicKey = "devicePublicKey"
     }
 
     // MARK: - Store

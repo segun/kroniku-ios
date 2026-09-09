@@ -145,10 +145,11 @@ struct AuthView: View {
 
         Task {
             do {
+                let clientDeviceId = try authService.getOrCreateClientDeviceId()
                 _ = try await authService.loginWithProvider(
                     provider: provider,
                     idToken: idToken,
-                    clientDeviceId: getOrCreateDeviceId(),
+                    clientDeviceId: clientDeviceId,
                     appVersion: getAppVersion()
                 )
                 isAuthenticated = true
@@ -191,17 +192,6 @@ struct AuthView: View {
             viewController = presented
         }
         return viewController
-    }
-
-    private func getOrCreateDeviceId() -> String {
-        let keychain = KeychainService.shared
-        if let existingId = try? keychain.retrieve(.clientDeviceId) {
-            return existingId
-        }
-
-        let newId = "ios-\(UUID().uuidString.prefix(8))"
-        try? keychain.store(newId, for: .clientDeviceId)
-        return newId
     }
 
     private func getAppVersion() -> String {
