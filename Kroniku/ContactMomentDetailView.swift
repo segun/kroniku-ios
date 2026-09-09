@@ -735,23 +735,25 @@ struct ContactMomentDetailView: View {
     }
 
     private var attachmentStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(photoAttachments) { attachment in
-                    ZStack(alignment: .topTrailing) {
-                        attachmentThumbnail(attachment)
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(photoAttachments) { attachment in
+                        ZStack(alignment: .topTrailing) {
+                            attachmentThumbnail(attachment)
 
-                        Button {
-                            photoAttachments.removeAll { $0.id == attachment.id }
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.white, .black.opacity(0.75))
+                            Button {
+                                photoAttachments.removeAll { $0.id == attachment.id }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.white, .black.opacity(0.75))
+                            }
+                            .offset(x: 6, y: -6)
                         }
-                        .offset(x: 6, y: -6)
                     }
                 }
+                .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
         }
     }
 

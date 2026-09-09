@@ -18,16 +18,6 @@ struct SettingsView: View {
 
                 ScrollView {
                     VStack(spacing: 14) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            KronikuLogoRow(subtitle: "Settings & Privacy")
-                            Text("")
-                                .font(.system(size: 30, weight: .bold, design: .rounded))
-                                .foregroundStyle(KronikuPalette.paper)
-                        }
-                        .padding(20)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-
                         if !contextController.consent.hasCompletedOnboarding || contextController.consent.needsOnboardingResume {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Onboarding is not complete")
@@ -43,6 +33,23 @@ struct SettingsView: View {
                             }
                             .kronikuCard(.context)
                         }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Your data")
+                                .font(.headline.weight(.semibold))
+                                .fontDesign(.rounded)
+                            Text("Your memories stay on this device. Export or remove them whenever you need.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Button("Export Data") { }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(KronikuPalette.ember)
+                                Button("Delete all data") { }
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                        .kronikuCard(.semantics)
 
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Kroniku stores data locally on your device. Turning a source off removes its retained data from existing memories.")
@@ -82,10 +89,14 @@ struct SettingsView: View {
                                 set: { contextController.setPhotoAttachmentEnabled($0) }
                             ))
 
-                            Toggle("When labels: sunrise, sunset, weekend, holiday", isOn: consentBinding(
+                            Toggle("Attach time-of-day labels", isOn: consentBinding(
                                 get: { contextController.consent.timeSemanticsEnabled },
                                 set: { contextController.setTimeSemanticsEnabled($0) }
                             ))
+
+                            Text("Attach time-of-day and calendar-aware labels such as sunrise, sunset, weekends, and holidays.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
 
                             Divider()
 
@@ -93,6 +104,9 @@ struct SettingsView: View {
                                 get: { contextController.consent.voiceTranscriptionEnabled },
                                 set: { contextController.setVoiceTranscriptionEnabled($0) }
                             ))
+                            Text("Turn a spoken recollection into editable details before saving.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
 
                             Toggle("Enable shared note ingestion", isOn: consentBinding(
                                 get: { contextController.consent.noteIngestionEnabled },
@@ -103,11 +117,17 @@ struct SettingsView: View {
                                 get: { contextController.consent.contactsResolutionEnabled },
                                 set: { contextController.setContactsResolutionEnabled($0) }
                             ))
+                            Text("Look up a person only when you ask Kroniku to resolve the name.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
 
                             Toggle("Enable bluetooth context enrichment", isOn: consentBinding(
                                 get: { contextController.consent.bluetoothContextEnabled },
                                 set: { contextController.setBluetoothContextEnabled($0) }
                             ))
+                            Text("Use nearby Bluetooth context, such as a car or headphones, as optional memory detail.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .kronikuCard(.calendar)
 
@@ -123,12 +143,6 @@ struct SettingsView: View {
                                 Toggle(metric.title, isOn: healthMetricBinding(metric))
                             }
 
-                            permissionRow(
-                                title: "HealthKit",
-                                status: contextController.healthPermission,
-                                canRetryWhenDenied: true,
-                                action: { Task { await contextController.requestHealthPermission() } }
-                            )
                         }
                         .kronikuCard(.semantics)
 
@@ -185,12 +199,6 @@ struct SettingsView: View {
                                 status: contextController.motionPermission,
                                 action: { Task { await contextController.requestMotionPermission() } }
                             )
-                            permissionRow(
-                                title: "HealthKit",
-                                status: contextController.healthPermission,
-                                canRetryWhenDenied: true,
-                                action: { Task { await contextController.requestHealthPermission() } }
-                            )
                         }
                         .kronikuCard(.context)
 
@@ -198,11 +206,7 @@ struct SettingsView: View {
                             Text("Data")
                                 .font(.headline.weight(.semibold))
                                 .fontDesign(.rounded)
-                            Button("Export data…") { }
-                            Button("Delete all local data") { }
-                                .foregroundStyle(.red)
-
-                            Button("Sign out") {
+                            Button(role: .destructive) {
                                 do {
                                     try AuthService.shared.logout()
                                     isAuthenticated = false
@@ -210,6 +214,13 @@ struct SettingsView: View {
                                     print("Sign out failed: \(error)")
                                 }
                             }
+                            label: {
+                                Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .accessibilityHint("Signs out of your Kroniku account")
 
                             Divider()
 
@@ -294,6 +305,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .padding(10)
+        .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func openAppSettings() {

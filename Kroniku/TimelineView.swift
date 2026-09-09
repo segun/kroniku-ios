@@ -1,6 +1,71 @@
 import SwiftUI
 import SwiftData
 
+private enum TimelinePeriod: CaseIterable, Equatable {
+    case morning
+    case afternoon
+    case earlyEvening
+    case night
+
+    struct Palette {
+        let background: Color
+        let text: Color
+        let accent: Color
+    }
+
+    init(date: Date) {
+        let hour = Calendar.current.component(.hour, from: date)
+        switch hour {
+        case 0..<6, 21...23:
+            self = .night
+        case 6..<12:
+            self = .morning
+        case 12..<17:
+            self = .afternoon
+        default:
+            self = .earlyEvening
+        }
+    }
+
+    var palette: Palette {
+        switch self {
+        case .morning:
+            return Palette(
+                background: Color(red: 250 / 255, green: 238 / 255, blue: 218 / 255),
+                text: Color(red: 99 / 255, green: 56 / 255, blue: 6 / 255),
+                accent: Color(red: 133 / 255, green: 79 / 255, blue: 11 / 255)
+            )
+        case .afternoon:
+            return Palette(
+                background: Color(red: 230 / 255, green: 241 / 255, blue: 251 / 255),
+                text: Color(red: 12 / 255, green: 68 / 255, blue: 112 / 255),
+                accent: Color(red: 24 / 255, green: 95 / 255, blue: 165 / 255)
+            )
+        case .earlyEvening:
+            return Palette(
+                background: Color(red: 245 / 255, green: 196 / 255, blue: 179 / 255),
+                text: Color(red: 74 / 255, green: 27 / 255, blue: 0),
+                accent: Color(red: 153 / 255, green: 60 / 255, blue: 29 / 255)
+            )
+        case .night:
+            return Palette(
+                background: Color(red: 60 / 255, green: 52 / 255, blue: 137 / 255),
+                text: Color(red: 206 / 255, green: 203 / 255, blue: 246 / 255),
+                accent: Color(red: 175 / 255, green: 169 / 255, blue: 236 / 255)
+            )
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .morning: return "Morning"
+        case .afternoon: return "Afternoon"
+        case .earlyEvening: return "Early evening"
+        case .night: return "Night"
+        }
+    }
+}
+
 struct TimelineView: View {
     private enum TimelineFilter: String, CaseIterable, Identifiable {
         case places
@@ -55,6 +120,10 @@ struct TimelineView: View {
 
     private var isShowingToday: Bool {
         calendar.isDate(selectedDate, inSameDayAs: Date())
+    }
+
+    private var currentPeriod: TimelinePeriod {
+        TimelinePeriod(date: Date())
     }
 
     private var filteredEvents: [MemoryEvent] {
@@ -117,13 +186,20 @@ struct TimelineView: View {
 
     var body: some View {
         NavigationStack {
-            KronikuHeroShell(title: heroTitle, subtitle: "Timeline") {
+            KronikuHeroShell(
+                title: heroTitle,
+                subtitle: "Timeline",
+                heroFill: AnyShapeStyle(currentPeriod.palette.background),
+                heroTitleColor: currentPeriod.palette.text,
+                heroSubtitleColor: currentPeriod.palette.text.opacity(0.72),
+                heroDetail: "\(selectedDate.formatted(.dateTime.weekday(.abbreviated).month().day())) · \(currentPeriod.title)"
+            ) {
                 daySummary
                 filterStrip
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("Timeline")
+                        Text("Memories")
                             .font(.title3.weight(.semibold))
                             .fontDesign(.rounded)
                         Spacer()
@@ -136,8 +212,11 @@ struct TimelineView: View {
                         emptyState
                     } else {
                         LazyVStack(spacing: 10) {
-                            ForEach(sortedEvents) { event in
-                                TimelineRow(event: event)
+                            ForEach(Array(sortedEvents.enumerated()), id: \.element.id) { index, event in
+                                TimelineRow(
+                                    event: event,
+                                    nextEvent: index + 1 < sortedEvents.count ? sortedEvents[index + 1] : nil
+                                )
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         if !event.isReadOnlySource {
@@ -303,7 +382,7 @@ struct TimelineView: View {
             Button {
                 showsDatePicker = true
             } label: {
-                statChip(icon: "calendar", title: selectedDate.formatted(.dateTime.weekday(.abbreviated).month().day()))
+                statChip(icon: "calendar", title: "Change date")
             }
             .buttonStyle(.plain)
 
@@ -315,6 +394,7 @@ struct TimelineView: View {
                 }
                 .buttonStyle(.plain)
             }
+
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -339,25 +419,27 @@ struct TimelineView: View {
     }
 
     private var filterStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(TimelineFilter.allCases) { filter in
-                    Button {
-                        toggle(filter)
-                    } label: {
-                        Label(filter.title, systemImage: filter.icon)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(selectedFilters.contains(filter) ? KronikuPalette.paper : KronikuPalette.night)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(
-                                selectedFilters.contains(filter)
-                                    ? AnyShapeStyle(KronikuPalette.heroGradient)
-                                    : AnyShapeStyle(KronikuPalette.sand.opacity(0.92)),
-                                in: Capsule()
-                            )
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(TimelineFilter.allCases) { filter in
+                        Button {
+                            toggle(filter)
+                        } label: {
+                            Label(filter.title, systemImage: filter.icon)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(selectedFilters.contains(filter) ? KronikuPalette.paper : KronikuPalette.night)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(
+                                    selectedFilters.contains(filter)
+                                        ? AnyShapeStyle(KronikuPalette.heroGradient)
+                                        : AnyShapeStyle(KronikuPalette.sand.opacity(0.92)),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -462,6 +544,72 @@ private struct TimelineEventActionSheet: View {
 
 private struct TimelineRow: View {
     let event: MemoryEvent
+    let nextEvent: MemoryEvent?
+
+    init(event: MemoryEvent, nextEvent: MemoryEvent? = nil) {
+        self.event = event
+        self.nextEvent = nextEvent
+    }
+
+    private var period: TimelinePeriod {
+        TimelinePeriod(date: event.occurredAt ?? Date())
+    }
+
+    private var nextPeriod: TimelinePeriod? {
+        guard let nextDate = nextEvent?.occurredAt else { return nil }
+        return TimelinePeriod(date: nextDate)
+    }
+
+    private var periodPalette: TimelinePeriod.Palette {
+        period.palette
+    }
+
+    private var displayTitle: String {
+        if event.source == "calendar", let title = cleaned(event.title) {
+            return title
+        }
+        if let contactMoment = event.contactMoment {
+            let interaction = contactMoment.interactionType.capitalized
+            if let personName = cleaned(contactMoment.personName) {
+                return "\(interaction) with \(personName)"
+            }
+            return interaction
+        }
+        if let detail = cleaned(event.detail) {
+            return firstSentence(detail)
+        }
+        if let title = cleaned(event.title) {
+            return firstSentence(title)
+        }
+        return "Untitled memory"
+    }
+
+    private var readableAttendees: String? {
+        guard let attendees = metadataByKey["attendees"] else { return nil }
+        let labels = attendees
+            .split(separator: ",")
+            .map { attendeeLabel(String($0)) }
+            .filter { !$0.isEmpty }
+        guard !labels.isEmpty else { return nil }
+        return labels.joined(separator: ", ")
+    }
+
+    private var timeOfDayFill: AnyShapeStyle {
+        guard let nextPeriod, nextPeriod != period else {
+            return AnyShapeStyle(periodPalette.background)
+        }
+        return AnyShapeStyle(
+            LinearGradient(
+                colors: [periodPalette.background, nextPeriod.palette.background],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+    }
+
+    private var timeOfDayBorder: Color {
+        periodPalette.accent.opacity(0.7)
+    }
 
     private var shouldShowContextText: Bool {
         guard let context = event.context?.trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty else {
@@ -512,7 +660,7 @@ private struct TimelineRow: View {
         }
 
         if let attendees = metadataByKey["attendees"], !attendees.isEmpty {
-            chips.append(.init(id: "attendees", text: attendees, icon: "person.2"))
+            chips.append(.init(id: "attendees", text: readableAttendees ?? attendees, icon: "person.2"))
         }
 
         if let healthSummary = event.healthSummary, !healthSummary.entries.isEmpty {
@@ -527,7 +675,7 @@ private struct TimelineRow: View {
         }
 
         if let score = event.confidenceScore {
-            chips.append(.init(id: "confidence", text: "\(Int((score * 100).rounded()))% confidence", icon: "checkmark.shield"))
+            chips.append(.init(id: "confidence", text: "\(Int((score * 100).rounded()))% verified", icon: "checkmark.shield"))
         }
 
         var deduped: [ContextChip] = []
@@ -626,50 +774,81 @@ private struct TimelineRow: View {
         return "--:--"
     }
 
+    private func cleaned(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func firstSentence(_ value: String) -> String {
+        let sentence = value.split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" }).first.map(String.init) ?? value
+        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count > 96 ? String(trimmed.prefix(93)) + "..." : trimmed
+    }
+
+    private func attendeeLabel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard trimmed.contains("@") else { return trimmed }
+        let localPart = trimmed.split(separator: "@", maxSplits: 1).first.map(String.init) ?? trimmed
+        return localPart
+            .replacingOccurrences(of: ".", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(timeText)
-                .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(KronikuPalette.night.opacity(0.72))
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(periodPalette.accent)
+                    .frame(width: 7, height: 7)
+                Text(timeText)
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(periodPalette.text.opacity(0.78))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
 
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: event.symbolName ?? "circle.fill")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(color(for: event.colorName))
+                    .foregroundStyle(periodPalette.accent)
                     .frame(width: 34, height: 34)
-                    .background(color(for: event.colorName).opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .background(periodPalette.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(event.title ?? "Untitled")
+                    Text(displayTitle)
                         .font(.body.weight(.semibold))
                         .fontDesign(.rounded)
+                        .foregroundStyle(periodPalette.text)
                         .lineLimit(2)
                         .truncationMode(.tail)
                     if let detail = event.detail, !detail.isEmpty {
                         Text(detail)
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(periodPalette.text.opacity(0.78))
                             .lineLimit(2)
                             .truncationMode(.tail)
                     }
                     if shouldShowContextText, let context = event.context, !context.isEmpty {
                         Text(context)
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(periodPalette.text.opacity(0.78))
                     }
                     if !contextChips.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 6) {
-                                ForEach(contextChips) { chip in
-                                    Label(chip.text, systemImage: chip.icon)
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(KronikuPalette.night)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(KronikuPalette.sand.opacity(0.95), in: Capsule())
+                        HorizontalScrollHint(fadeColor: periodPalette.background) {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(contextChips) { chip in
+                                        Label(chip.text, systemImage: chip.icon)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(periodPalette.accent)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(periodPalette.accent.opacity(0.14), in: Capsule())
+                                    }
                                 }
                             }
                         }
@@ -677,19 +856,19 @@ private struct TimelineRow: View {
                     if event.isReadOnlySource {
                         Text("Read-only calendar")
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(KronikuPalette.night)
+                            .foregroundStyle(periodPalette.text)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(KronikuPalette.sand, in: Capsule())
+                            .background(periodPalette.accent.opacity(0.16), in: Capsule())
                     }
                 }
             }
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(rowFill))
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(timeOfDayFill))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(rowBorder, lineWidth: 1)
+                .stroke(timeOfDayBorder, lineWidth: 1.2)
         )
     }
 }

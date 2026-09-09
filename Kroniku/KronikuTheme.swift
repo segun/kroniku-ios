@@ -100,6 +100,8 @@ extension View {
 
 struct KronikuLogoRow: View {
     var subtitle: String
+    var titleColor: Color = KronikuPalette.paper
+    var subtitleColor: Color = KronikuPalette.fog
 
     var body: some View {
         HStack(spacing: 12) {
@@ -113,11 +115,11 @@ struct KronikuLogoRow: View {
                 Text("Kroniku")
                     .font(.title3.weight(.semibold))
                     .fontDesign(.rounded)
-                    .foregroundStyle(KronikuPalette.paper)
+                    .foregroundStyle(titleColor)
                 Text(subtitle.uppercased())
                     .font(.caption2.weight(.medium))
                     .tracking(1.2)
-                    .foregroundStyle(KronikuPalette.fog)
+                    .foregroundStyle(subtitleColor)
             }
 
             Spacer()
@@ -128,6 +130,10 @@ struct KronikuLogoRow: View {
 struct KronikuHeroShell<Content: View>: View {
     let title: String
     let subtitle: String
+    var heroFill: AnyShapeStyle = AnyShapeStyle(KronikuPalette.heroGradient)
+    var heroTitleColor: Color = KronikuPalette.paper
+    var heroSubtitleColor: Color = KronikuPalette.fog
+    var heroDetail: String? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -138,15 +144,25 @@ struct KronikuHeroShell<Content: View>: View {
             ScrollView {
                 VStack(spacing: 18) {
                     VStack(alignment: .leading, spacing: 14) {
-                        KronikuLogoRow(subtitle: subtitle)
+                        KronikuLogoRow(
+                            subtitle: subtitle,
+                            titleColor: heroTitleColor,
+                            subtitleColor: heroSubtitleColor
+                        )
 
                         Text(title)
                             .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .foregroundStyle(KronikuPalette.paper)
+                            .foregroundStyle(heroTitleColor)
+
+                        if let heroDetail {
+                            Text(heroDetail)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(heroTitleColor.opacity(0.78))
+                        }
                     }
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .background(heroFill, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
                     .overlay(alignment: .topTrailing) {
                         Circle()
                             .fill(KronikuPalette.emberGradient)
@@ -161,6 +177,46 @@ struct KronikuHeroShell<Content: View>: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 28)
+            }
+        }
+    }
+}
+
+struct HorizontalScrollHint<Content: View>: View {
+    let fadeColor: Color
+    @ViewBuilder let content: Content
+    @State private var isPulsing = false
+
+    init(fadeColor: Color = KronikuPalette.sand, @ViewBuilder content: () -> Content) {
+        self.fadeColor = fadeColor
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            content
+
+            LinearGradient(
+                colors: [.clear, fadeColor.opacity(0.96)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 42)
+            .allowsHitTesting(false)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(KronikuPalette.night)
+                .padding(.trailing, 5)
+                .opacity(isPulsing ? 0.35 : 1)
+                .offset(x: isPulsing ? 3 : 0)
+                .allowsHitTesting(false)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityHint("Swipe left to see more")
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                isPulsing = true
             }
         }
     }

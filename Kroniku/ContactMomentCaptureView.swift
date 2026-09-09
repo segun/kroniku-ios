@@ -35,6 +35,7 @@ struct ContactMomentCaptureView: View {
     @State private var isSaving = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var photoAttachments: [PhotoAttachment] = []
+    @State private var manualEntryShown = false
 
     private var trimmedNote: String {
         note.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,7 +62,7 @@ struct ContactMomentCaptureView: View {
     }
 
     private var shouldShowEditableDetails: Bool {
-        !isListening && (voiceTranscript.isEmpty || didApplyVoiceDetails)
+        !canUseVoiceFlow || manualEntryShown || didApplyVoiceDetails
     }
 
     private var linkableEvents: [MemoryEvent] {
@@ -83,8 +84,6 @@ struct ContactMomentCaptureView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 12) {
-                            KronikuLogoRow(subtitle: "Capture")
-
                             HStack(spacing: 12) {
                                 Button {
                                     focusedField = nil
@@ -111,23 +110,31 @@ struct ContactMomentCaptureView: View {
                                     Text(isListening ? "Recording" : "Record a moment")
                                         .font(.title2.weight(.bold))
                                         .fontDesign(.rounded)
-                                        .foregroundStyle(KronikuPalette.paper)
+                                        .foregroundStyle(KronikuPalette.ink)
                                     Text(
                                         isListening
                                         ? "Tap to stop recording"
                                         : (canUseVoiceFlow ? "Capture first, refine second." : "Enable voice transcription in Settings.")
                                     )
                                         .font(.subheadline)
-                                        .foregroundStyle(KronikuPalette.fog)
+                                        .foregroundStyle(KronikuPalette.night.opacity(0.72))
                                 }
                                 Spacer()
                             }
                         }
-                        .padding(20)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                        .padding(.horizontal, 4)
 
                         VStack(spacing: 14) {
+                            if canUseVoiceFlow {
+                                Button {
+                                    manualEntryShown.toggle()
+                                } label: {
+                                    Label(manualEntryShown ? "Use voice instead" : "Type instead", systemImage: manualEntryShown ? "mic" : "keyboard")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
                             if shouldShowVoiceCaptureSection {
                                 voiceCaptureSection
                             }
@@ -159,11 +166,20 @@ struct ContactMomentCaptureView: View {
 
                                 if contextController.consent.noteIngestionEnabled {
                                     formField(title: "Shared note") {
-                                        TextEditor(text: $sharedNote)
-                                            .frame(minHeight: 92)
-                                            .focused($focusedField, equals: .sharedNote)
-                                            .padding(6)
-                                            .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        ZStack(alignment: .topLeading) {
+                                            if trimmedSharedNote.isEmpty {
+                                                Text("Add a note or detail to keep with this memory…")
+                                                    .font(.body)
+                                                    .foregroundStyle(.secondary)
+                                                    .padding(.horizontal, 12)
+                                                    .padding(.vertical, 14)
+                                            }
+                                            TextEditor(text: $sharedNote)
+                                                .frame(minHeight: 92)
+                                                .focused($focusedField, equals: .sharedNote)
+                                                .padding(6)
+                                        }
+                                        .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                                         if !linkableEvents.isEmpty {
                                             Text("Link this note to existing memories")
@@ -211,8 +227,7 @@ struct ContactMomentCaptureView: View {
                                                 Label(photoAttachments.isEmpty ? "Link photos" : "Update photos", systemImage: "photo.on.rectangle.angled")
                                                     .frame(maxWidth: .infinity)
                                             }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(KronikuPalette.ember)
+                                            .buttonStyle(.bordered)
 
                                             if !photoAttachments.isEmpty {
                                                 attachmentStrip
@@ -241,8 +256,7 @@ struct ContactMomentCaptureView: View {
                                                 Label("Resolve person", systemImage: "person.crop.circle.badge.checkmark")
                                                     .frame(maxWidth: .infinity)
                                             }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(KronikuPalette.ember)
+                                            .buttonStyle(.bordered)
                                             .disabled(trimmedPersonName.isEmpty)
 
                                             if let resolvedPerson {
@@ -463,23 +477,25 @@ struct ContactMomentCaptureView: View {
     }
 
     private var attachmentStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(photoAttachments) { attachment in
-                    ZStack(alignment: .topTrailing) {
-                        attachmentThumbnail(attachment)
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(photoAttachments) { attachment in
+                        ZStack(alignment: .topTrailing) {
+                            attachmentThumbnail(attachment)
 
-                        Button {
-                            photoAttachments.removeAll { $0.id == attachment.id }
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.white, .black.opacity(0.75))
+                            Button {
+                                photoAttachments.removeAll { $0.id == attachment.id }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.white, .black.opacity(0.75))
+                            }
+                            .offset(x: 6, y: -6)
                         }
-                        .offset(x: 6, y: -6)
                     }
                 }
+                .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
         }
     }
 

@@ -81,6 +81,7 @@ struct WelcomeOnboardingView: View {
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
+                .clipped()
                 .animation(.easeInOut, value: currentPage)
 
                 VStack(spacing: 20) {
@@ -139,6 +140,11 @@ private struct WelcomeOnboardingPageView: View {
                         .opacity(0.85)
                         .offset(y: floatUp ? -8 : 8)
 
+                    Circle()
+                        .fill(KronikuPalette.ink.opacity(0.82))
+                        .frame(width: 146, height: 146)
+                        .offset(y: floatUp ? -8 : 8)
+
                     Image(systemName: page.symbolName)
                         .font(.system(size: 64, weight: .semibold))
                         .foregroundStyle(.white)
@@ -164,10 +170,37 @@ private struct WelcomeOnboardingPageView: View {
                         .foregroundStyle(KronikuPalette.ink.opacity(0.7))
                         .padding(.horizontal, 12)
                 }
+
+                if page.index >= 2 {
+                    timelinePreview
+                }
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
         }
+    }
+
+    private var timelinePreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(0..<3, id: \.self) { index in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(KronikuPalette.ember.opacity(0.8))
+                        .frame(width: 7, height: 7)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(KronikuPalette.ink.opacity(0.12))
+                        .frame(width: index == 1 ? 180 : 220, height: 10)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.52), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.75), lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
     }
 }
 
