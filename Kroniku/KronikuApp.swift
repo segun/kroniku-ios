@@ -4,12 +4,20 @@ import SwiftData
 @main
 struct KronikuApp: App {
     @State private var isAuthenticated = false
+    @State private var hasCompletedWelcome = UserDefaults.standard.bool(forKey: Self.hasCompletedWelcomeKey)
     private let authService = AuthService.shared
+
+    private static let hasCompletedWelcomeKey = "hasCompletedWelcomeOnboarding"
 
     var body: some Scene {
         WindowGroup {
             Group {
-                if isAuthenticated {
+                if !hasCompletedWelcome {
+                    WelcomeOnboardingView {
+                        UserDefaults.standard.set(true, forKey: Self.hasCompletedWelcomeKey)
+                        withAnimation { hasCompletedWelcome = true }
+                    }
+                } else if isAuthenticated {
                     RootTabView(isAuthenticated: $isAuthenticated)
                 } else {
                     AuthView(isAuthenticated: $isAuthenticated)
