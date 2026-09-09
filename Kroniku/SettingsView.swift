@@ -3,6 +3,7 @@ import UIKit
 
 struct SettingsView: View {
     @Binding var showsTier1Onboarding: Bool
+    @Binding var isAuthenticated: Bool
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
@@ -200,6 +201,15 @@ struct SettingsView: View {
                             Button("Export data…") { }
                             Button("Delete all local data") { }
                                 .foregroundStyle(.red)
+
+                            Button("Sign out") {
+                                do {
+                                    try AuthService.shared.logout()
+                                    isAuthenticated = false
+                                } catch {
+                                    print("Sign out failed: \(error)")
+                                }
+                            }
 
                             Divider()
 

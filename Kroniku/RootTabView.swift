@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RootTabView: View {
+    @Binding var isAuthenticated: Bool
     @State private var selectedTab: Tab = .timeline
     @State private var showsCapture = false
     @State private var showsTier1Onboarding = false
@@ -21,7 +22,10 @@ struct RootTabView: View {
                 .tabItem { Label("Memory", systemImage: "sparkles") }
                 .tag(Tab.memory)
 
-            SettingsView(showsTier1Onboarding: $showsTier1Onboarding)
+            SettingsView(
+                showsTier1Onboarding: $showsTier1Onboarding,
+                isAuthenticated: $isAuthenticated
+            )
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }

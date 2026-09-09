@@ -3,11 +3,32 @@ import SwiftData
 
 @main
 struct KronikuApp: App {
-    // Provide a model container so SwiftData-backed models are available app-wide.
+    @State private var isAuthenticated = false
+    private let authService = AuthService.shared
+
     var body: some Scene {
         WindowGroup {
-            RootTabView()
+            Group {
+                if isAuthenticated {
+                    RootTabView(isAuthenticated: $isAuthenticated)
+                } else {
+                    AuthView(isAuthenticated: $isAuthenticated)
+                }
+            }
+            .onAppear {
+                checkAuthStatus()
+            }
         }
         .modelContainer(for: [MemoryEvent.self, ContactMoment.self, Place.self, WeatherSnapshot.self])
     }
+
+    private func checkAuthStatus() {
+        // Check if user has a valid access token
+        if let _ = try? authService.getAccessToken() {
+            isAuthenticated = true
+        } else {
+            isAuthenticated = false
+        }
+    }
 }
+

@@ -6,13 +6,30 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A10000000000000000000012 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000011 /* GoogleSignIn */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A10000000000000000000001 /* Kroniku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kroniku.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9B3A8EEB3050D04E007F030C /* Exceptions for "Kroniku" folder in "Kroniku" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A10000000000000000000005 /* Kroniku */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A10000000000000000000002 /* Kroniku */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9B3A8EEB3050D04E007F030C /* Exceptions for "Kroniku" folder in "Kroniku" target */,
+			);
 			path = Kroniku;
 			sourceTree = "<group>";
 		};
@@ -23,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A10000000000000000000012 /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +83,7 @@
 			);
 			name = Kroniku;
 			packageProductDependencies = (
+				A10000000000000000000011 /* GoogleSignIn */,
 			);
 			productName = Kroniku;
 			productReference = A10000000000000000000001 /* Kroniku.app */;
@@ -94,6 +113,9 @@
 			);
 			mainGroup = A10000000000000000000003;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A10000000000000000000010 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000004 /* Products */;
 			projectDirPath = "";
@@ -168,13 +190,15 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = QLNTY3GVPQ;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Kroniku/Info.plist;
+				INFOPLIST_KEY_GOOGLE_CLIENT_ID = "308723545363-8igumqurisepjkgn7srpdufk9uc7knod.apps.googleusercontent.com";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Kroniku can capture bluetooth context like car, headphones, or speaker when you opt in.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Kroniku can import calendar events when you opt in.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "Kroniku can resolve people names against your contacts only when you opt in.";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Kroniku can read the health metrics you choose so it can summarize them on memories you capture.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kroniku uses the microphone only when you explicitly start recording a voice moment.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Kroniku can attach nearby places to moments when you opt in.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kroniku uses the microphone only when you explicitly start recording a voice moment.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Kroniku can attach motion state like walking or driving when you opt in.";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Kroniku can capture bluetooth context like car, headphones, or speaker when you opt in.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Kroniku transcribes your voice moments on device after you explicitly record.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -199,13 +223,15 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = QLNTY3GVPQ;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Kroniku/Info.plist;
+				INFOPLIST_KEY_GOOGLE_CLIENT_ID = "308723545363-8igumqurisepjkgn7srpdufk9uc7knod.apps.googleusercontent.com";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Kroniku can capture bluetooth context like car, headphones, or speaker when you opt in.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Kroniku can import calendar events when you opt in.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "Kroniku can resolve people names against your contacts only when you opt in.";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Kroniku can read the health metrics you choose so it can summarize them on memories you capture.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kroniku uses the microphone only when you explicitly start recording a voice moment.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Kroniku can attach nearby places to moments when you opt in.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kroniku uses the microphone only when you explicitly start recording a voice moment.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Kroniku can attach motion state like walking or driving when you opt in.";
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Kroniku can capture bluetooth context like car, headphones, or speaker when you opt in.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Kroniku transcribes your voice moments on device after you explicitly record.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -243,6 +269,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A10000000000000000000010 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000011 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000010 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A1000000000000000000000A /* Project object */;
 }
