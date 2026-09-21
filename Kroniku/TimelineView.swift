@@ -81,7 +81,7 @@ struct TimelineView: View {
         var title: String {
             switch self {
             case .places: return "Places"
-            case .interactions: return "Interactions"
+            case .interactions: return "Moments"
             case .calendar: return "Calendar"
             case .weather: return "Weather"
             case .motion: return "Motion"
@@ -93,7 +93,7 @@ struct TimelineView: View {
         var icon: String {
             switch self {
             case .places: return "mappin.and.ellipse"
-            case .interactions: return "person.2"
+            case .interactions: return "sparkles"
             case .calendar: return "calendar"
             case .weather: return "cloud.sun"
             case .motion: return "figure.walk"
@@ -214,9 +214,11 @@ struct TimelineView: View {
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 4)
 
                     if sortedEvents.isEmpty {
                         emptyState
+                            .padding(.horizontal, 4)
                     } else {
                         LazyVStack(spacing: 10) {
                             ForEach(Array(sortedEvents.enumerated()), id: \.element.id) { index, event in
@@ -260,6 +262,7 @@ struct TimelineView: View {
                                 }
                                 .buttonStyle(.plain)
                             }
+                            .padding(.horizontal, 4)
 
                             if showsHiddenEvents {
                                 LazyVStack(spacing: 10) {
@@ -293,7 +296,6 @@ struct TimelineView: View {
                         .padding(.top, 6)
                     }
                 }
-                .kronikuCard(.context)
             }
             .refreshable {
                 await refreshTimeline()
@@ -443,7 +445,7 @@ struct TimelineView: View {
             return "No memories match the active filters for this day. Clear one or more filters to widen the timeline."
         }
         if isShowingToday {
-            return "Tap the + button to save a contact moment. Calendar imports appear after consent."
+            return "Tap the + button to save a moment. Calendar imports appear after consent."
         }
         return "No events were recorded for this day. Pick another date or jump back to today."
     }
@@ -649,11 +651,14 @@ private struct TimelineRow: View {
             return title
         }
         if let contactMoment = event.contactMoment {
-            let interaction = contactMoment.interactionType.capitalized
-            if let personName = cleaned(contactMoment.personName) {
-                return "\(interaction) with \(personName)"
+            if let note = cleaned(contactMoment.note) {
+                return firstSentence(note)
             }
-            return interaction
+            let names = contactMoment.contactNames.isEmpty ? [contactMoment.personName].compactMap { $0 } : contactMoment.contactNames
+            if !names.isEmpty {
+                return names.joined(separator: ", ")
+            }
+            return "Moment"
         }
         if let detail = cleaned(event.detail) {
             return firstSentence(detail)
@@ -696,12 +701,12 @@ private struct TimelineRow: View {
     }
 
     private var shouldShowContextText: Bool {
+        // For moments, `context` only carries backend search text (e.g. "Moment Eric BJ"); never render it.
+        guard event.source != "contactMoment" else { return false }
         guard let context = event.context?.trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty else {
             return false
         }
-        guard event.source == "contactMoment" else { return true }
-        let redundantInteractionLabels: Set<String> = ["call", "text", "meeting"]
-        return !redundantInteractionLabels.contains(context.lowercased())
+        return true
     }
 
     private struct ContextChip: Identifiable, Hashable {
@@ -745,6 +750,14 @@ private struct TimelineRow: View {
 
         if let attendees = metadataByKey["attendees"], !attendees.isEmpty {
             chips.append(.init(id: "attendees", text: readableAttendees ?? attendees, icon: "person.2"))
+        }
+
+        if let contactMoment = event.contactMoment {
+            let names = contactMoment.contactNames.isEmpty ? [contactMoment.personName].compactMap { $0 } : contactMoment.contactNames
+            // Only surface contacts as a chip when the note is already the headline; otherwise the title covers it.
+            if !names.isEmpty, cleaned(contactMoment.note) != nil {
+                chips.append(.init(id: "contacts", text: names.joined(separator: ", "), icon: "person.2"))
+            }
         }
 
         if let healthSummary = event.healthSummary, !healthSummary.entries.isEmpty {
@@ -909,7 +922,7 @@ private struct TimelineRow: View {
                         .foregroundStyle(periodPalette.text)
                         .lineLimit(2)
                         .truncationMode(.tail)
-                    if let detail = event.detail, !detail.isEmpty {
+                    if let detail = event.detail, !detail.isEmpty, event.source != "contactMoment" {
                         Text(detail)
                             .font(.subheadline)
                             .foregroundStyle(periodPalette.text.opacity(0.78))

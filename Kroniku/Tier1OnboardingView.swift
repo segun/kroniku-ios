@@ -167,7 +167,7 @@ struct Tier1OnboardingView: View {
                         set: { contextController.setPhotoAttachmentEnabled($0) }
                     ))
 
-                    Text("When enabled, contact moments can keep selected photos alongside their notes. Turning it off removes saved photo links.")
+                    Text("When enabled, moments can keep selected photos alongside their notes. Turning it off removes saved photo links.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

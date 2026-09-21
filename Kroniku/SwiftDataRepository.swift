@@ -23,7 +23,7 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 /// A small repository wrapper around a SwiftData ModelContext.
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID]) throws
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID], contactNames: [String], resolvedContactIdentifiers: [String], endedAt: Date?) throws
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws
     func applyRetentionPolicy(for consent: Tier1ConsentState) throws
     func delete(event: MemoryEvent) throws
@@ -56,11 +56,12 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = []) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = [], contactNames: [String] = [], resolvedContactIdentifiers: [String] = [], endedAt: Date? = nil) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContactNames = contactNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
-        guard !(trimmedNote.isEmpty && (trimmedPersonName?.isEmpty ?? true)) else {
+        guard !(trimmedNote.isEmpty && (trimmedPersonName?.isEmpty ?? true) && trimmedContactNames.isEmpty) else {
             throw MemoryRepositoryError.emptyContactMoment
         }
 
@@ -72,9 +73,12 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName,
             interactionType: interaction.rawValue,
             occurredAt: occurredAt,
+            endedAt: endedAt,
             note: trimmedNote,
             captureMethod: captureMethod,
-            resolvedContactIdentifier: resolvedContactIdentifier
+            resolvedContactIdentifier: resolvedContactIdentifier,
+            contactNames: trimmedContactNames,
+            resolvedContactIdentifiers: resolvedContactIdentifiers
         )
 
         var metadata: [ContextCard.MetadataEntry] = [
@@ -84,19 +88,27 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         if let bluetoothContext {
             metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
         }
+        if !trimmedContactNames.isEmpty {
+            metadata.append(.init(key: "contacts", value: trimmedContactNames.joined(separator: ",")))
+        }
+        if let endedAt {
+            metadata.append(.init(key: "endedAt", value: ISO8601DateFormatter().string(from: endedAt)))
+        }
 
         let contextCard = ContextCard(
             source: "contactMoment",
-            category: "interaction",
+            category: "moment",
             summary: trimmedNote,
             metadata: metadata
         )
+        // searchText mirrors what should be full-text searchable on the backend (note is already the title).
+        let searchText = ([interaction.title] + trimmedContactNames).joined(separator: " ")
         let me = MemoryEvent(
             occurredAt: occurredAt,
             source: "contactMoment",
             title: cm.note,
-            detail: cm.personName,
-            context: interaction.title,
+            detail: trimmedContactNames.isEmpty ? cm.personName : trimmedContactNames.joined(separator: ", "),
+            context: searchText,
             contextCard: contextCard,
             symbolName: interaction.symbol,
             colorName: "indigo",
@@ -392,12 +404,18 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             category: "moment",
             summary: event.title ?? ""
         )
-        card.metadata.removeAll { $0.key == "motion" || $0.key == "timeSemantics" }
+        card.metadata.removeAll { $0.key == "motion" || $0.key == "timeSemantics" || $0.key == "contacts" || $0.key == "endedAt" }
         if let motion = contextData.motion {
             card.metadata.append(.init(key: "motion", value: motion))
         }
         if let timeSemantics = contextData.timeSemantics, !timeSemantics.isEmpty {
             card.metadata.append(.init(key: "timeSemantics", value: timeSemantics.joined(separator: ",")))
+        }
+        if let contacts = contextData.contacts, !contacts.isEmpty {
+            card.metadata.append(.init(key: "contacts", value: contacts.joined(separator: ",")))
+        }
+        if let endedAt = contextData.endedAt {
+            card.metadata.append(.init(key: "endedAt", value: ISO8601DateFormatter().string(from: endedAt)))
         }
         event.contextCard = card
         event.photoAttachments = (contextData.photoReferences ?? []).map {
@@ -597,7 +615,9 @@ private extension MemoryEvent {
             },
             motion: metadataByKey["motion"],
             timeSemantics: timeSemantics,
-            photoReferences: photoReferences
+            photoReferences: photoReferences,
+            contacts: contactMoment?.contactNames.isEmpty == false ? contactMoment?.contactNames : nil,
+            endedAt: contactMoment?.endedAt
         )
     }
 

@@ -10,11 +10,12 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = []) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = [], contactNames: [String] = [], resolvedContactIdentifiers: [String] = [], endedAt: Date? = nil) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContactNames = contactNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
-        guard !(trimmedNote.isEmpty && (trimmedPersonName?.isEmpty ?? true)) else {
+        guard !(trimmedNote.isEmpty && (trimmedPersonName?.isEmpty ?? true) && trimmedContactNames.isEmpty) else {
             throw MemoryRepositoryError.emptyContactMoment
         }
 
@@ -29,17 +30,20 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         if let bluetoothContext {
             metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
         }
+        if !trimmedContactNames.isEmpty {
+            metadata.append(.init(key: "contacts", value: trimmedContactNames.joined(separator: ",")))
+        }
 
-        let cm = ContactMoment(personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: trimmedNote, captureMethod: captureMethod, resolvedContactIdentifier: resolvedContactIdentifier)
+        let cm = ContactMoment(personName: trimmedPersonName?.isEmpty == true ? nil : trimmedPersonName, interactionType: interaction.rawValue, occurredAt: occurredAt, endedAt: endedAt, note: trimmedNote, captureMethod: captureMethod, resolvedContactIdentifier: resolvedContactIdentifier, contactNames: trimmedContactNames, resolvedContactIdentifiers: resolvedContactIdentifiers)
         let me = MemoryEvent(
             occurredAt: occurredAt,
             source: "contactMoment",
             title: cm.note,
-            detail: cm.personName,
+            detail: trimmedContactNames.isEmpty ? cm.personName : trimmedContactNames.joined(separator: ", "),
             context: interaction.title,
             contextCard: ContextCard(
                 source: "contactMoment",
-                category: "interaction",
+                category: "moment",
                 summary: trimmedNote,
                 metadata: metadata
             ),

@@ -325,24 +325,33 @@ final class MemoryEvent: Identifiable {
 @Model
 final class ContactMoment: Identifiable {
     @Attribute(.unique) var id: UUID = UUID()
+    // Deprecated: kept for backward compatibility with existing data; new captures use contactNames.
     var personName: String?
     var interactionType: String
     var occurredAt: Date
+    // End of the occurredAt...endedAt range; nil means no explicit end was recorded.
+    var endedAt: Date?
     var note: String
     var captureMethod: String
+    // Deprecated: kept for backward compatibility; new captures use resolvedContactIdentifiers.
     var resolvedContactIdentifier: String?
+    var contactNames: [String] = []
+    var resolvedContactIdentifiers: [String] = []
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
 
     var memoryEvent: MemoryEvent?
 
-    init(personName: String? = nil, interactionType: String = "call", occurredAt: Date = Date(), note: String = "", captureMethod: String = "typed", resolvedContactIdentifier: String? = nil) {
+    init(personName: String? = nil, interactionType: String = "moment", occurredAt: Date = Date(), endedAt: Date? = nil, note: String = "", captureMethod: String = "typed", resolvedContactIdentifier: String? = nil, contactNames: [String] = [], resolvedContactIdentifiers: [String] = []) {
         self.personName = personName
         self.interactionType = interactionType
         self.occurredAt = occurredAt
+        self.endedAt = endedAt
         self.note = note
         self.captureMethod = captureMethod
         self.resolvedContactIdentifier = resolvedContactIdentifier
+        self.contactNames = contactNames
+        self.resolvedContactIdentifiers = resolvedContactIdentifiers
     }
 }
 
@@ -379,12 +388,14 @@ final class WeatherSnapshot: Identifiable {
 }
 
 // Shared interaction type used by capture and detail UIs.
+// `.moment` is the default for free-form captures; call/text/meeting remain for legacy data.
 enum Interaction: String, CaseIterable, Identifiable {
-    case call, text, meeting
+    case moment, call, text, meeting
     var id: Self { self }
     var title: String { rawValue.capitalized }
     var symbol: String {
         switch self {
+        case .moment: return "sparkles"
         case .call: return "phone.fill"
         case .text: return "message.fill"
         case .meeting: return "person.2.fill"

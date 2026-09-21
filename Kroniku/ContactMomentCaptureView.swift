@@ -5,7 +5,7 @@ import UIKit
 
 struct ContactMomentCaptureView: View {
     private enum FocusField: Hashable {
-        case personName, note, sharedNote, voiceTranscript
+        case contactName, note, sharedNote, voiceTranscript
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -17,20 +17,27 @@ struct ContactMomentCaptureView: View {
 
     @State private var note = ""
     @State private var sharedNote = ""
-    @State private var personName = ""
-    @State private var interaction = Interaction.call
+    @State private var interaction: Interaction = .moment
+    @State private var contactNameInput = ""
+    @State private var contactNames: [String] = []
     @State private var isListening = false
     @State private var voiceTranscript = ""
     @State private var transcriptionResult: Tier2TranscriptionResult?
     @State private var didApplyVoiceDetails = false
-    @State private var resolvedPerson: Tier2ResolvedPerson?
+    @State private var resolvedContactIdentifiers: [String: String] = [:]
+    @State private var resolvingContactName: String?
+    @State private var pendingContactResolutionQueue: [String] = []
     @State private var resolutionCandidates: [Tier2ResolvedPerson] = []
     @State private var isShowingResolutionPicker = false
     @State private var resolutionStatusMessage: String?
     @State private var capturedBluetoothContext: BluetoothContextKind?
     @State private var linkedEventIDs: Set<UUID> = []
     @State private var voiceErrorMessage: String?
-    @State private var occurredAt = Date()
+    @State private var startTime = Date()
+    @State private var endTime: Date?
+    @State private var hasEndTime = false
+    // Kept mounted at all times so the DatePicker is never destroyed/recreated, which crashes on some iOS versions.
+    @State private var endTimeDraft = Date()
     @State private var saveErrorMessage: String?
     @State private var isSaving = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -41,17 +48,24 @@ struct ContactMomentCaptureView: View {
         note.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var trimmedPersonName: String {
-        personName.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var trimmedContactNameInput: String {
+        contactNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var trimmedSharedNote: String {
         sharedNote.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var canSave: Bool {
-        !(trimmedNote.isEmpty && trimmedPersonName.isEmpty && voiceTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    private var hasValidTimeRange: Bool {
+        guard let endTime else { return true }
+        return endTime >= startTime
     }
+
+    private var canSave: Bool {
+        let hasContent = !(trimmedNote.isEmpty && contactNames.isEmpty && voiceTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        return hasContent && hasValidTimeRange
+    }
+
 
     private var canUseVoiceFlow: Bool {
         contextController.consent.voiceTranscriptionEnabled
@@ -140,28 +154,49 @@ struct ContactMomentCaptureView: View {
                             }
 
                             if shouldShowEditableDetails {
-                                Picker("Interaction", selection: $interaction) {
-                                    ForEach(Interaction.allCases) { item in
-                                        Label(item.title, systemImage: item.symbol).tag(item)
-                                    }
-                                }
-                                .pickerStyle(.segmented)
-
-                                formField(title: "Who") {
-                                    TextField("Person name (optional)", text: $personName)
-                                        .textFieldStyle(.plain)
-                                        .focused($focusedField, equals: .personName)
-                                        .padding(12)
-                                        .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                formField(title: "Type") {
+                                    interactionPicker
                                 }
 
                                 formField(title: "What happened") {
-                                    TextField("e.g. Called Mr. Kroenke about the contract", text: $note, axis: .vertical)
+                                    TextField("e.g. Went for a run between 12am and 3am", text: $note, axis: .vertical)
                                         .lineLimit(3...6)
                                         .textFieldStyle(.plain)
                                         .focused($focusedField, equals: .note)
                                         .padding(12)
                                         .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+
+                                formField(title: "Start Time") {
+                                    DatePicker("Start time", selection: $startTime, displayedComponents: [.date, .hourAndMinute])
+                                        .labelsHidden()
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                formField(title: "End Time") {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Toggle("Has an end time", isOn: $hasEndTime)
+                                            .font(.subheadline)
+                                            .onChange(of: hasEndTime) { _, isOn in
+                                                endTime = isOn ? max(startTime, endTimeDraft) : nil
+                                            }
+
+                                        DatePicker("End time", selection: $endTimeDraft, displayedComponents: [.date, .hourAndMinute])
+                                            .labelsHidden()
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .disabled(!hasEndTime)
+                                            .opacity(hasEndTime ? 1 : 0.35)
+                                            .onChange(of: endTimeDraft) { _, newValue in
+                                                guard hasEndTime else { return }
+                                                endTime = newValue
+                                            }
+
+                                        if hasEndTime && !hasValidTimeRange {
+                                            Text("End time must be after the start time.")
+                                                .font(.caption)
+                                                .foregroundStyle(.red)
+                                        }
+                                    }
                                 }
 
                                 if contextController.consent.noteIngestionEnabled {
@@ -214,12 +249,6 @@ struct ContactMomentCaptureView: View {
                                     }
                                 }
 
-                                formField(title: "When") {
-                                    DatePicker("Occurred at", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
-                                        .labelsHidden()
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-
                                 formField(title: "Attachments") {
                                     if contextController.consent.photoAttachmentEnabled {
                                         VStack(alignment: .leading, spacing: 10) {
@@ -240,42 +269,51 @@ struct ContactMomentCaptureView: View {
                                     }
                                 }
 
-                                if contextController.consent.contactsResolutionEnabled {
-                                    formField(title: "Contacts") {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            Text("Match person names with your contacts only when you choose.")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                formField(title: "Contacts") {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text("Link zero or more people to this moment.")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
 
+                                        if !contactNames.isEmpty {
+                                            contactChipStrip
+                                        }
+
+                                        HStack(spacing: 8) {
+                                            TextField("Add a contact name", text: $contactNameInput)
+                                                .textFieldStyle(.plain)
+                                                .focused($focusedField, equals: .contactName)
+                                                .padding(12)
+                                                .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                                .onSubmit { addContactName() }
+
+                                            Button {
+                                                addContactName()
+                                            } label: {
+                                                Image(systemName: "plus.circle.fill")
+                                                    .font(.title2)
+                                            }
+                                            .disabled(trimmedContactNameInput.isEmpty)
+                                        }
+
+                                        if contextController.consent.contactsResolutionEnabled {
                                             Button {
                                                 focusedField = nil
                                                 Task {
-                                                    await resolvePersonFromContacts()
+                                                    await resolveContactsFromContactsApp()
                                                 }
                                             } label: {
-                                                Label("Match person", systemImage: "person.crop.circle.badge.checkmark")
+                                                Label("Match with Contacts", systemImage: "person.crop.circle.badge.checkmark")
                                                     .frame(maxWidth: .infinity)
                                             }
                                             .buttonStyle(.bordered)
-                                            .disabled(trimmedPersonName.isEmpty)
+                                            .disabled(contactNames.isEmpty)
+                                        }
 
-                                            if let resolvedPerson {
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text("Matched: \(resolvedPerson.displayName)")
-                                                        .font(.subheadline)
-                                                    if let hint = resolvedPerson.disambiguationHint {
-                                                        Text(hint)
-                                                            .font(.caption)
-                                                            .foregroundStyle(.secondary)
-                                                    }
-                                                }
-                                            }
-
-                                            if let resolutionStatusMessage {
-                                                Text(resolutionStatusMessage)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                            }
+                                        if let resolutionStatusMessage {
+                                            Text(resolutionStatusMessage)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
                                         }
                                     }
                                 }
@@ -287,7 +325,7 @@ struct ContactMomentCaptureView: View {
                     .padding(.vertical, 10)
                 }
             }
-            .navigationTitle("Contact moment")
+            .navigationTitle("Moment")
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
@@ -329,12 +367,6 @@ struct ContactMomentCaptureView: View {
                 await loadPhotoAttachments(from: newItems)
             }
         }
-        .onChange(of: personName) { _, _ in
-            resolvedPerson = nil
-            resolutionCandidates = []
-            isShowingResolutionPicker = false
-            resolutionStatusMessage = nil
-        }
         .confirmationDialog(
             "Choose contact",
             isPresented: $isShowingResolutionPicker,
@@ -342,7 +374,7 @@ struct ContactMomentCaptureView: View {
         ) {
             ForEach(resolutionCandidates, id: \.identifier) { candidate in
                 Button {
-                    applyResolvedPerson(candidate)
+                    applyResolvedContact(candidate)
                 } label: {
                     if let hint = candidate.disambiguationHint, !hint.isEmpty {
                         Text("\(candidate.displayName) - \(hint)")
@@ -352,7 +384,11 @@ struct ContactMomentCaptureView: View {
                 }
             }
             Button("Cancel", role: .cancel) {
-                resolutionStatusMessage = "No contact selected."
+                resolutionStatusMessage = "No contact selected for \(resolvingContactName ?? "that name")."
+                resolvingContactName = nil
+                Task {
+                    await processNextPendingContactResolution()
+                }
             }
         }
         .onDisappear {
@@ -411,6 +447,34 @@ struct ContactMomentCaptureView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var interactionPicker: some View {
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Interaction.allCases) { item in
+                        Button {
+                            interaction = item
+                        } label: {
+                            Label(item.title, systemImage: item.symbol)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(interaction == item ? KronikuPalette.paper : KronikuPalette.night)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    interaction == item
+                                        ? AnyShapeStyle(KronikuPalette.heroGradient)
+                                        : AnyShapeStyle(KronikuPalette.sand.opacity(0.92)),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
     private func saveContactMoment() async {
         isSaving = true
         defer { isSaving = false }
@@ -444,31 +508,28 @@ struct ContactMomentCaptureView: View {
             extractionReview = nil
         }
 
-        if contextController.consent.contactsResolutionEnabled,
-           resolvedPerson == nil,
-           !trimmedPersonName.isEmpty {
-            await resolvePersonFromContacts()
-        }
-
         if contextController.consent.bluetoothContextEnabled {
             capturedBluetoothContext = await tier2Controller.captureBluetoothContext()
         }
 
         let repo = SwiftDataMemoryRepository(modelContext: modelContext)
         do {
-            let enrichment = await contextController.buildEnrichment(for: occurredAt)
+            let enrichment = await contextController.buildEnrichment(for: startTime)
             try repo.addContactMoment(
-                personName: trimmedPersonName,
+                personName: nil,
                 interactionType: interaction.rawValue,
-                occurredAt: occurredAt,
+                occurredAt: startTime,
                 note: mergedNote,
                 contextEnrichment: enrichment,
                 photoAttachments: photoAttachments,
-                resolvedContactIdentifier: resolvedPerson?.identifier,
+                resolvedContactIdentifier: nil,
                 extractionReview: extractionReview,
                 bluetoothContext: capturedBluetoothContext,
                 confidenceScore: extractionReview?.confidence.overall,
-                linkedEventIDs: Array(linkedEventIDs)
+                linkedEventIDs: Array(linkedEventIDs),
+                contactNames: contactNames,
+                resolvedContactIdentifiers: contactNames.compactMap { resolvedContactIdentifiers[$0] },
+                endedAt: endTime
             )
             dismiss()
         } catch {
@@ -561,36 +622,68 @@ struct ContactMomentCaptureView: View {
     }
 
     private func applyExtraction(_ result: Tier2TranscriptionResult) {
-        if let extractedPersonName = result.extractedPersonName, trimmedPersonName.isEmpty {
-            personName = extractedPersonName
+        if let extractedPersonName = result.extractedPersonName {
+            let trimmed = extractedPersonName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && !contactNames.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+                contactNames.append(trimmed)
+            }
         }
         if let extractedInteraction = result.extractedInteraction {
             interaction = extractedInteraction
         }
         if let extractedOccurredAt = result.extractedOccurredAt {
-            occurredAt = extractedOccurredAt
+            startTime = extractedOccurredAt
         }
         if trimmedNote.isEmpty {
             note = result.transcript
         }
     }
 
-    private func resolvePersonFromContacts() async {
+    private func addContactName() {
+        let trimmed = trimmedContactNameInput
+        guard !trimmed.isEmpty else { return }
+        if !contactNames.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            contactNames.append(trimmed)
+        }
+        contactNameInput = ""
+    }
+
+    private func removeContactName(_ name: String) {
+        contactNames.removeAll { $0 == name }
+        resolvedContactIdentifiers[name] = nil
+    }
+
+    private var contactChipStrip: some View {
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(contactNames, id: \.self) { name in
+                        HStack(spacing: 4) {
+                            if resolvedContactIdentifiers[name] != nil {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.caption2)
+                            }
+                            Text(name)
+                                .font(.caption.weight(.semibold))
+                            Button {
+                                removeContactName(name)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(KronikuPalette.sand, in: Capsule())
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    private func resolveContactsFromContactsApp() async {
         guard contextController.consent.contactsResolutionEnabled else { return }
-
-        resolvedPerson = nil
-        resolutionCandidates = []
-        isShowingResolutionPicker = false
-        let lookupName = trimmedPersonName
-        guard !lookupName.isEmpty else {
-            resolutionStatusMessage = nil
-            return
-        }
-
-        guard lookupName.count >= 2 else {
-            resolutionStatusMessage = "Type at least 2 characters to match a contact."
-            return
-        }
 
         if tier2Controller.contactsPermission == .notDetermined {
             await tier2Controller.requestContactsPermission()
@@ -600,25 +693,48 @@ struct ContactMomentCaptureView: View {
             return
         }
 
-        let matches = await tier2Controller.resolvePeople(named: lookupName, limit: 5)
-        if matches.isEmpty {
-            resolutionStatusMessage = "No close contact match found."
-            return
-        }
-
-        if matches.count == 1, let only = matches.first {
-            applyResolvedPerson(only)
-            return
-        }
-
-        resolutionCandidates = matches
-        isShowingResolutionPicker = true
-        resolutionStatusMessage = "Multiple close matches found. Choose one."
+        pendingContactResolutionQueue = contactNames.filter { resolvedContactIdentifiers[$0] == nil }
+        await processNextPendingContactResolution()
     }
 
-    private func applyResolvedPerson(_ person: Tier2ResolvedPerson) {
-        resolvedPerson = person
-        personName = person.displayName
+    // Walks the queue automatically, only pausing to surface a picker when a name has multiple matches.
+    private func processNextPendingContactResolution() async {
+        guard !pendingContactResolutionQueue.isEmpty else {
+            resolutionStatusMessage = "Matched contacts where possible."
+            return
+        }
+
+        let name = pendingContactResolutionQueue.removeFirst()
+        guard resolvedContactIdentifiers[name] == nil else {
+            await processNextPendingContactResolution()
+            return
+        }
+
+        let matches = await tier2Controller.resolvePeople(named: name, limit: 5)
+        if matches.isEmpty {
+            await processNextPendingContactResolution()
+            return
+        }
+        if matches.count == 1, let only = matches.first {
+            resolvedContactIdentifiers[name] = only.identifier
+            await processNextPendingContactResolution()
+            return
+        }
+
+        resolvingContactName = name
+        resolutionCandidates = matches
+        isShowingResolutionPicker = true
+        resolutionStatusMessage = "Multiple matches for \(name). Choose one."
+    }
+
+    private func applyResolvedContact(_ person: Tier2ResolvedPerson) {
+        if let name = resolvingContactName {
+            resolvedContactIdentifiers[name] = person.identifier
+        }
+        resolvingContactName = nil
         resolutionStatusMessage = "Matched from your contacts."
+        Task {
+            await processNextPendingContactResolution()
+        }
     }
 }

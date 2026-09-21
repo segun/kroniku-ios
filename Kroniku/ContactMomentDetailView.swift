@@ -5,7 +5,7 @@ import UIKit
 
 struct ContactMomentDetailView: View {
     private enum FocusField: Hashable {
-        case personName, note
+        case contactName, note
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -16,10 +16,15 @@ struct ContactMomentDetailView: View {
 
     let event: MemoryEvent
 
-    @State private var personName: String = ""
+    @State private var contactNames: [String] = []
+    @State private var contactNameInput: String = ""
     @State private var note: String = ""
-    @State private var interaction: Interaction = .call
+    @State private var interaction: Interaction = .moment
     @State private var occurredAt: Date = Date()
+    @State private var endedAt: Date?
+    @State private var hasEndTime = false
+    // Kept mounted at all times so the DatePicker is never destroyed/recreated, which crashes on some iOS versions.
+    @State private var endTimeDraft = Date()
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var photoAttachments: [PhotoAttachment] = []
     @State private var isEditing = false
@@ -36,8 +41,31 @@ struct ContactMomentDetailView: View {
     private var detailMetadata: [ContextCard.MetadataEntry] {
         let metadata = event.contextCard?.metadata ?? []
         return metadata.filter { entry in
-            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit")
+            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit" || entry.key == "contacts" || entry.key == "endedAt")
         }
+    }
+
+    private var trimmedContactNameInput: String {
+        contactNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasValidTimeRange: Bool {
+        guard let endedAt else { return true }
+        return endedAt >= occurredAt
+    }
+
+    private var canSaveEdits: Bool {
+        let hasContent = !(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && contactNames.isEmpty)
+        return hasContent && hasValidTimeRange
+    }
+
+    private var timeRangeText: String {
+        let start = occurredAt.formatted(.dateTime.weekday().month().day().hour().minute())
+        guard let endedAt else { return start }
+        if Calendar.current.isDate(occurredAt, inSameDayAs: endedAt) {
+            return "\(start) - \(endedAt.formatted(.dateTime.hour().minute()))"
+        }
+        return "\(start) - \(endedAt.formatted(.dateTime.weekday().month().day().hour().minute()))"
     }
 
     private var metadataByKey: [String: String] {
@@ -60,13 +88,17 @@ struct ContactMomentDetailView: View {
         self.event = event
         // initialize states from linked contact moment if available
         if let cm = event.contactMoment {
-            _personName = State(initialValue: cm.personName ?? "")
+            let names = cm.contactNames.isEmpty ? [cm.personName].compactMap { $0 } : cm.contactNames
+            _contactNames = State(initialValue: names)
             _note = State(initialValue: cm.note)
-            _interaction = State(initialValue: Interaction(rawValue: cm.interactionType) ?? .call)
+            _interaction = State(initialValue: Interaction(rawValue: cm.interactionType) ?? .moment)
             _occurredAt = State(initialValue: cm.occurredAt)
+            _endedAt = State(initialValue: cm.endedAt)
+            _hasEndTime = State(initialValue: cm.endedAt != nil)
+            _endTimeDraft = State(initialValue: cm.endedAt ?? cm.occurredAt)
         } else {
             // fallback to MemoryEvent fields
-            _personName = State(initialValue: event.detail ?? "")
+            _contactNames = State(initialValue: [event.detail].compactMap { $0 }.filter { !$0.isEmpty })
             _note = State(initialValue: event.title ?? "")
             _occurredAt = State(initialValue: event.occurredAt ?? Date())
         }
@@ -127,7 +159,7 @@ struct ContactMomentDetailView: View {
                 .padding(.vertical, 10)
             }
         }
-        .navigationTitle("Contact moment")
+        .navigationTitle("Moment")
         .navigationBarTitleDisplayMode(.inline)
         .scrollDismissesKeyboard(.interactively)
         .toolbar {
@@ -140,7 +172,7 @@ struct ContactMomentDetailView: View {
                             isEditing = false
                         }
                         .fontWeight(.semibold)
-                        .disabled(personName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!canSaveEdits)
                     } else {
                         Button("Edit") {
                             isEditing = true
@@ -235,14 +267,42 @@ struct ContactMomentDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var interactionPicker: some View {
+        HorizontalScrollHint {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Interaction.allCases) { item in
+                        Button {
+                            interaction = item
+                        } label: {
+                            Label(item.title, systemImage: item.symbol)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(interaction == item ? KronikuPalette.paper : KronikuPalette.night)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    interaction == item
+                                        ? AnyShapeStyle(KronikuPalette.heroGradient)
+                                        : AnyShapeStyle(KronikuPalette.sand.opacity(0.92)),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
     private var viewModeContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            iconValueRow(systemImage: "calendar.badge.clock", value: occurredAt.formatted(.dateTime.weekday().month().day().hour().minute()))
+            iconValueRow(systemImage: interaction.symbol, value: interaction.title)
 
-            if !personName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                iconDualValueRow(primarySystemImage: "person.fill", secondarySystemImage: interaction.symbol, value: personName)
-            } else {
-                iconValueRow(systemImage: interaction.symbol, value: interaction.title)
+            iconValueRow(systemImage: "calendar.badge.clock", value: timeRangeText)
+
+            if !contactNames.isEmpty {
+                iconValueRow(systemImage: "person.fill", value: contactNames.joined(separator: ", "))
             }
 
             if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -297,26 +357,79 @@ struct ContactMomentDetailView: View {
 
     private var editModeContent: some View {
         VStack(spacing: 12) {
-            fieldBlock(title: "When") {
-                DatePicker("Occurred at", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
+            fieldBlock(title: "Type") {
+                interactionPicker
+            }
+
+            fieldBlock(title: "Start Time") {
+                DatePicker("Start time", selection: $occurredAt, displayedComponents: [.date, .hourAndMinute])
                     .labelsHidden()
             }
 
-            fieldBlock(title: "Interaction") {
-                Picker("Interaction", selection: $interaction) {
-                    ForEach(Interaction.allCases) { i in
-                        Label(i.title, systemImage: i.symbol).tag(i)
+            fieldBlock(title: "End Time") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Has an end time", isOn: $hasEndTime)
+                        .font(.subheadline)
+                        .onChange(of: hasEndTime) { _, isOn in
+                            endedAt = isOn ? max(occurredAt, endTimeDraft) : nil
+                        }
+
+                    DatePicker("End time", selection: $endTimeDraft, displayedComponents: [.date, .hourAndMinute])
+                        .labelsHidden()
+                        .disabled(!hasEndTime)
+                        .opacity(hasEndTime ? 1 : 0.35)
+                        .onChange(of: endTimeDraft) { _, newValue in
+                            guard hasEndTime else { return }
+                            endedAt = newValue
+                        }
+
+                    if hasEndTime && !hasValidTimeRange {
+                        Text("End time must be after the start time.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
                     }
                 }
-                .pickerStyle(.segmented)
             }
 
-            fieldBlock(title: "Who") {
-                TextField("Person name", text: $personName)
-                    .textFieldStyle(.plain)
-                    .focused($focusedField, equals: .personName)
-                    .padding(12)
-                    .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            fieldBlock(title: "Contacts") {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !contactNames.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(contactNames, id: \.self) { name in
+                                HStack(spacing: 4) {
+                                    Text(name)
+                                        .font(.caption.weight(.semibold))
+                                    Button {
+                                        contactNames.removeAll { $0 == name }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(KronikuPalette.sand, in: Capsule())
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Add a contact name", text: $contactNameInput)
+                            .textFieldStyle(.plain)
+                            .focused($focusedField, equals: .contactName)
+                            .padding(12)
+                            .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .onSubmit { addContactName() }
+
+                        Button {
+                            addContactName()
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title2)
+                        }
+                        .disabled(trimmedContactNameInput.isEmpty)
+                    }
+                }
             }
 
             fieldBlock(title: "Note") {
@@ -355,7 +468,7 @@ struct ContactMomentDetailView: View {
 
             if event.contactMoment != nil {
                 Button(role: .destructive) { deleteBoth() } label: {
-                    Label("Delete contact moment", systemImage: "trash")
+                    Label("Delete moment", systemImage: "trash")
                         .frame(maxWidth: .infinity)
                 }
                 .padding(.top, 6)
@@ -471,27 +584,6 @@ struct ContactMomentDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    private func iconDualValueRow(primarySystemImage: String, secondarySystemImage: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: primarySystemImage)
-                    .foregroundStyle(.secondary)
-                Image(systemName: secondarySystemImage)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(width: 44, alignment: .leading)
-
-            Text(value)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(value), interaction \(interaction.title)")
     }
 
     private func iconValueButtonRow(systemImage: String, value: String, action: @escaping () -> Void) -> some View {
@@ -638,42 +730,64 @@ struct ContactMomentDetailView: View {
 
     private func reloadFromEvent() {
         if let cm = event.contactMoment {
-            personName = cm.personName ?? ""
+            contactNames = cm.contactNames.isEmpty ? [cm.personName].compactMap { $0 } : cm.contactNames
             note = cm.note
-            interaction = Interaction(rawValue: cm.interactionType) ?? .call
+            interaction = Interaction(rawValue: cm.interactionType) ?? .moment
             occurredAt = cm.occurredAt
+            endedAt = cm.endedAt
+            hasEndTime = cm.endedAt != nil
+            endTimeDraft = cm.endedAt ?? cm.occurredAt
         } else {
-            personName = event.detail ?? ""
+            contactNames = [event.detail].compactMap { $0 }.filter { !$0.isEmpty }
             note = event.title ?? ""
+            interaction = .moment
             occurredAt = event.occurredAt ?? Date()
+            endedAt = nil
+            hasEndTime = false
         }
+        contactNameInput = ""
         photoAttachments = event.photoAttachments
         selectedPhotoItems = []
     }
 
+    private func addContactName() {
+        let trimmed = trimmedContactNameInput
+        guard !trimmed.isEmpty else { return }
+        if !contactNames.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            contactNames.append(trimmed)
+        }
+        contactNameInput = ""
+    }
+
     private func saveChanges() {
+        let contactsMetadata: [ContextCard.MetadataEntry] = contactNames.isEmpty ? [] : [.init(key: "contacts", value: contactNames.joined(separator: ","))]
+        let searchText = ([interaction.title] + contactNames).joined(separator: " ")
+
         if let cm = event.contactMoment {
-            cm.personName = personName.isEmpty ? nil : personName
+            cm.contactNames = contactNames
+            cm.personName = contactNames.first
             cm.note = note
             cm.interactionType = interaction.rawValue
             cm.occurredAt = occurredAt
+            cm.endedAt = endedAt
             cm.updatedAt = Date()
 
             // keep MemoryEvent in sync
             event.occurredAt = occurredAt
             event.title = note
-            event.detail = personName
-            event.context = interaction.title
+            event.detail = contactNames.isEmpty ? nil : contactNames.joined(separator: ", ")
+            event.context = searchText
             let preservedMetadata = detailMetadata
             event.contextCard = ContextCard(
                 source: "contactMoment",
-                category: "interaction",
+                category: "moment",
                 summary: note,
                 metadata: [
-                    .init(key: "interactionType", value: interaction.rawValue),
+                    .init(key: "interactionType", value: cm.interactionType),
                     .init(key: "captureMethod", value: cm.captureMethod)
-                ] + preservedMetadata
+                ] + contactsMetadata + preservedMetadata
             )
+            event.symbolName = interaction.symbol
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
             event.updatedAt = Date()
             event.backendVersion = max(1, event.backendVersion + 1)
@@ -687,25 +801,26 @@ struct ContactMomentDetailView: View {
             }
         } else {
             // create new contact moment and link it
-            let cm = ContactMoment(personName: personName.isEmpty ? nil : personName, interactionType: interaction.rawValue, occurredAt: occurredAt, note: note, captureMethod: "typed")
+            let cm = ContactMoment(personName: contactNames.first, interactionType: interaction.rawValue, occurredAt: occurredAt, endedAt: endedAt, note: note, captureMethod: "typed", contactNames: contactNames)
             cm.memoryEvent = event
             event.contactMoment = cm
 
             // update event fields
             event.occurredAt = occurredAt
             event.title = note
-            event.detail = personName
-            event.context = interaction.title
+            event.detail = contactNames.isEmpty ? nil : contactNames.joined(separator: ", ")
+            event.context = searchText
             let preservedMetadata = detailMetadata
             event.contextCard = ContextCard(
                 source: "contactMoment",
-                category: "interaction",
+                category: "moment",
                 summary: note,
                 metadata: [
                     .init(key: "interactionType", value: interaction.rawValue),
                     .init(key: "captureMethod", value: "typed")
-                ] + preservedMetadata
+                ] + contactsMetadata + preservedMetadata
             )
+            event.symbolName = interaction.symbol
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
             event.backendVersion = max(1, event.backendVersion + 1)
             event.syncedToBackendAt = nil

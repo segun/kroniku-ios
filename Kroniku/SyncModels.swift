@@ -26,10 +26,13 @@ struct SyncEventContextData: Codable, Equatable {
     let motion: String?
     let timeSemantics: [String]?
     let photoReferences: [SyncPhotoReference]?
+    let contacts: [String]?
+    let endedAt: Date?
 
     var isEmpty: Bool {
         place == nil && weather == nil && motion == nil &&
-        (timeSemantics?.isEmpty ?? true) && (photoReferences?.isEmpty ?? true)
+        (timeSemantics?.isEmpty ?? true) && (photoReferences?.isEmpty ?? true) &&
+        (contacts?.isEmpty ?? true) && endedAt == nil
     }
 }
 

@@ -20,7 +20,7 @@ final class EventTests: XCTestCase {
 
         let contextCard = try XCTUnwrap(event.contextCard)
         XCTAssertEqual(contextCard.source, "contactMoment")
-        XCTAssertEqual(contextCard.category, "interaction")
+        XCTAssertEqual(contextCard.category, "moment")
         XCTAssertEqual(contextCard.summary, "Called Alice")
         XCTAssertTrue(contextCard.metadata.contains(where: { $0.key == "interactionType" && $0.value == "call" }))
         XCTAssertTrue(contextCard.metadata.contains(where: { $0.key == "captureMethod" && $0.value == "typed" }))
