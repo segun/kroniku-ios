@@ -36,7 +36,7 @@ final class APIClient: @unchecked Sendable {
 
     private static var defaultBaseURL: URL {
         #if DEBUG
-        return URL(string: "https://f6ed-105-113-64-30.ngrok-free.app")!
+        return URL(string: "https://kroniku.segun.me")!
         #else
         return URL(string: "https://api.kroniku.app")!
         #endif

@@ -189,6 +189,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         } else {
             event.isDeleted = true
             event.updatedAt = Date()
+            event.backendVersion = max(1, event.backendVersion + 1)
             event.syncedToBackendAt = nil
         }
         try modelContext.save()
@@ -325,8 +326,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
     }
 
     func makePushRequest(for event: MemoryEvent) -> PushEventRequest {
-        let payload = event.encryptedPayload ?? event.defaultEncryptedPayload
-        let hash = event.payloadHash ?? event.defaultPayloadHash
+        let contextData = event.syncContextData
+        let payload = event.defaultEncryptedPayload
+        let hash = event.defaultPayloadHash
         return PushEventRequest(
             eventId: event.backendEventId ?? event.id.uuidString,
             version: max(event.backendVersion, 1),
@@ -335,6 +337,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             title: event.title,
             detail: event.detail,
             searchText: event.context,
+            contextData: contextData.isEmpty ? nil : contextData,
             encryptedPayload: payload,
             payloadHash: hash,
             isDeleted: event.isDeleted
@@ -353,6 +356,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         let event = MemoryEvent(occurredAt: remote.occurredAt, source: remote.source, title: remote.title, detail: remote.detail, context: remote.searchText, backendEventId: remote.eventId, backendVersion: remote.version, syncedToBackendAt: remote.updatedAt, payloadHash: remote.payloadHash, encryptedPayload: remote.encryptedPayload, isDeleted: remote.isDeleted)
         event.createdAt = remote.createdAt
         event.updatedAt = remote.updatedAt
+        apply(contextData: remote.contextData, to: event)
         return event
     }
 
@@ -364,12 +368,45 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         event.title = remote.title
         event.detail = remote.detail
         event.context = remote.searchText
+        apply(contextData: remote.contextData, to: event)
         event.payloadHash = remote.payloadHash
         event.encryptedPayload = remote.encryptedPayload
         event.isDeleted = remote.isDeleted
         event.createdAt = remote.createdAt
         event.updatedAt = remote.updatedAt
         event.syncedToBackendAt = remote.updatedAt
+    }
+
+    private func apply(contextData: SyncEventContextData?, to event: MemoryEvent) {
+        guard let contextData else { return }
+
+        event.place = contextData.place.map {
+            Place(name: $0.name, latitude: $0.latitude, longitude: $0.longitude)
+        }
+        event.weatherSnapshot = contextData.weather.map {
+            WeatherSnapshot(observedAt: $0.observedAt, condition: $0.condition, temperatureC: $0.temperatureC)
+        }
+
+        var card = event.contextCard ?? ContextCard(
+            source: event.source ?? "unknown",
+            category: "moment",
+            summary: event.title ?? ""
+        )
+        card.metadata.removeAll { $0.key == "motion" || $0.key == "timeSemantics" }
+        if let motion = contextData.motion {
+            card.metadata.append(.init(key: "motion", value: motion))
+        }
+        if let timeSemantics = contextData.timeSemantics, !timeSemantics.isEmpty {
+            card.metadata.append(.init(key: "timeSemantics", value: timeSemantics.joined(separator: ",")))
+        }
+        event.contextCard = card
+        event.photoAttachments = (contextData.photoReferences ?? []).map {
+            PhotoAttachment(
+                assetIdentifier: $0.assetIdentifier,
+                filename: $0.filename ?? $0.assetIdentifier,
+                addedAt: $0.addedAt
+            )
+        }
     }
 
     private func apply(enrichment: ContextEnrichment?, to event: MemoryEvent) {
@@ -532,11 +569,47 @@ private struct LocalSyncPayload: Codable {
     let title: String?
     let detail: String?
     let context: String?
+    let contextData: SyncEventContextData
 }
 
 private extension MemoryEvent {
+    var syncContextData: SyncEventContextData {
+        let metadataByKey = Dictionary(
+            (contextCard?.metadata ?? []).map { ($0.key, $0.value) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let timeSemantics = metadataByKey["timeSemantics"]?
+            .split(separator: ",")
+            .map(String.init)
+        let photoReferences = photoAttachments.compactMap { attachment -> SyncPhotoReference? in
+            guard let assetIdentifier = attachment.assetIdentifier else { return nil }
+            return SyncPhotoReference(
+                assetIdentifier: assetIdentifier,
+                filename: attachment.filename,
+                addedAt: attachment.addedAt
+            )
+        }
+
+        return SyncEventContextData(
+            place: place.map { SyncPlaceData(name: $0.name, latitude: $0.latitude, longitude: $0.longitude) },
+            weather: weatherSnapshot.map {
+                SyncWeatherData(observedAt: $0.observedAt, condition: $0.condition, temperatureC: $0.temperatureC)
+            },
+            motion: metadataByKey["motion"],
+            timeSemantics: timeSemantics,
+            photoReferences: photoReferences
+        )
+    }
+
     var defaultEncryptedPayload: String {
-        let payload = LocalSyncPayload(occurredAt: occurredAt, source: source, title: title, detail: detail, context: context)
+        let payload = LocalSyncPayload(
+            occurredAt: occurredAt,
+            source: source,
+            title: title,
+            detail: detail,
+            context: context,
+            contextData: syncContextData
+        )
         guard let data = try? JSONEncoder.iso8601.encode(payload) else { return "" }
         return data.base64EncodedString()
     }

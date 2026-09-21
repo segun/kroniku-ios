@@ -114,7 +114,7 @@ struct ContactMomentCaptureView: View {
                                     Text(
                                         isListening
                                         ? "Tap to stop recording"
-                                        : (canUseVoiceFlow ? "Capture first, refine second." : "Enable voice transcription in Settings.")
+                                        : (canUseVoiceFlow ? "Capture first, refine second." : "Turn on spoken notes in Settings.")
                                     )
                                         .font(.subheadline)
                                         .foregroundStyle(KronikuPalette.night.opacity(0.72))
@@ -241,9 +241,9 @@ struct ContactMomentCaptureView: View {
                                 }
 
                                 if contextController.consent.contactsResolutionEnabled {
-                                    formField(title: "Contacts resolution") {
+                                    formField(title: "Contacts") {
                                         VStack(alignment: .leading, spacing: 8) {
-                                            Text("Resolve person names with your contacts only when you choose.")
+                                            Text("Match person names with your contacts only when you choose.")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
 
@@ -253,7 +253,7 @@ struct ContactMomentCaptureView: View {
                                                     await resolvePersonFromContacts()
                                                 }
                                             } label: {
-                                                Label("Resolve person", systemImage: "person.crop.circle.badge.checkmark")
+                                                Label("Match person", systemImage: "person.crop.circle.badge.checkmark")
                                                     .frame(maxWidth: .infinity)
                                             }
                                             .buttonStyle(.bordered)
@@ -500,42 +500,24 @@ struct ContactMomentCaptureView: View {
     }
 
     private func attachmentThumbnail(_ attachment: PhotoAttachment) -> some View {
-        Group {
-            if let uiImage = UIImage(data: attachment.imageData) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.gray.opacity(0.15)
-                    .overlay(Image(systemName: "photo"))
-            }
-        }
-        .frame(width: 92, height: 92)
+        PhotoAttachmentThumbnail(attachment: attachment, size: CGSize(width: 92, height: 92))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func loadPhotoAttachments(from items: [PhotosPickerItem]) async {
         var attachments: [PhotoAttachment] = []
-        for (index, item) in items.enumerated() {
-            guard let data = try? await item.loadTransferable(type: Data.self),
-                  let normalizedData = normalizedImageData(from: data) else {
-                continue
-            }
-            let filename = item.itemIdentifier ?? "photo-\(index + 1).jpg"
-            attachments.append(PhotoAttachment(filename: filename, imageData: normalizedData))
+        for item in items {
+            guard let assetIdentifier = item.itemIdentifier else { continue }
+            attachments.append(
+                PhotoAttachment(assetIdentifier: assetIdentifier, filename: assetIdentifier)
+            )
         }
         photoAttachments = attachments
     }
 
-    private func normalizedImageData(from data: Data) -> Data? {
-        guard let image = UIImage(data: data) else { return data }
-        let resized = image.kronikuScaled(maxDimension: 1400)
-        return resized.jpegData(compressionQuality: 0.62) ?? data
-    }
-
     private func toggleVoiceRecording() async {
         guard canUseVoiceFlow else {
-            voiceErrorMessage = "Enable voice transcription capture in Settings first."
+            voiceErrorMessage = "Turn on spoken notes in Settings first."
             return
         }
 
@@ -606,7 +588,7 @@ struct ContactMomentCaptureView: View {
         }
 
         guard lookupName.count >= 2 else {
-            resolutionStatusMessage = "Type at least 2 characters to resolve a contact."
+            resolutionStatusMessage = "Type at least 2 characters to match a contact."
             return
         }
 
@@ -614,7 +596,7 @@ struct ContactMomentCaptureView: View {
             await tier2Controller.requestContactsPermission()
         }
         guard tier2Controller.contactsPermission == .authorized else {
-            resolutionStatusMessage = "Contacts permission is required to resolve people."
+            resolutionStatusMessage = "Contacts permission is required to match people."
             return
         }
 
@@ -637,25 +619,6 @@ struct ContactMomentCaptureView: View {
     private func applyResolvedPerson(_ person: Tier2ResolvedPerson) {
         resolvedPerson = person
         personName = person.displayName
-        resolutionStatusMessage = "Resolved from your contacts."
-    }
-}
-
-private extension UIImage {
-    func kronikuScaled(maxDimension: CGFloat) -> UIImage {
-        let width = size.width
-        let height = size.height
-        let longest = max(width, height)
-        guard longest > maxDimension else { return self }
-
-        let ratio = maxDimension / longest
-        let targetSize = CGSize(width: width * ratio, height: height * ratio)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = false
-        format.scale = 1
-
-        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: targetSize))
-        }
+        resolutionStatusMessage = "Matched from your contacts."
     }
 }

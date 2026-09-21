@@ -3,6 +3,28 @@
 ## Overview
 This plan outlines the phased approach to update the iOS frontend to use the backend APIs defined in `backend-api-contract.md`. The frontend currently uses local SwiftData storage; we will add network sync capabilities while maintaining offline-first functionality.
 
+## User-defined Day Periods
+
+The iOS app now stores four configurable period start times locally. The default schedule is:
+
+- Morning starts at 06:00
+- Afternoon starts at 12:00 and ends when early evening starts at 16:00
+- Early evening starts at 16:00 and ends when night starts at 21:00
+- Night starts at 21:00 and wraps through 05:59
+
+To persist this preference across devices, the backend should add a user-scoped preferences resource rather than storing the values on individual events:
+
+- `GET /v1/me/preferences` returns the current preferences.
+- `PATCH /v1/me/preferences` accepts a partial update such as `{ "dayPeriods": { "morningStartMinutes": 360, "afternoonStartMinutes": 720, "earlyEveningStartMinutes": 960, "nightStartMinutes": 1260 } }`.
+- Store the four values as integer minutes since local midnight, together with `updatedAt` and optionally a `timezoneIdentifier` such as `America/Los_Angeles`.
+- Validate that all four starts are in the range `0...1439` and strictly increasing. Reject invalid schedules with `400`; do not silently reorder user input.
+- Return the normalized schedule, `updatedAt`, and a schema/version field so future period models can migrate safely.
+- Treat this as non-sensitive account preference data. It should be included in account export and deleted with the account, but it should not be copied into every event payload.
+- On sign-in or device registration, the client should pull preferences and apply them locally. While offline, local settings remain authoritative and queue a PATCH for the next successful sync.
+- Use `updatedAt` or an explicit preference version for last-write-wins conflict handling when the same account is edited on multiple devices.
+
+The current frontend can use the existing `SyncCoordinator`/API client for this later. The local Codable consent store is already backward-compatible: older installs fall back to the defaults above until the server sends a schedule.
+
 ---
 
 ## Phase 1: Foundation (Network & Auth)
@@ -32,8 +54,6 @@ This plan outlines the phased approach to update the iOS frontend to use the bac
 
 **Tasks:**
 - Create `AuthService.swift` - HTTP methods for auth endpoints
-  - `register(email: String, password: String, clientDeviceId: String, platform: String, appVersion: String, publicKey: String?) async throws -> AuthResponse`
-  - `login(email: String, password: String, clientDeviceId: String, platform: String, appVersion: String, publicKey: String?) async throws -> AuthResponse`
   - `loginWithProvider(provider: String, idToken: String, clientDeviceId: String, platform: String, appVersion: String, publicKey: String?) async throws -> ProviderAuthResponse`
   - `getBackendStatus() async throws -> HealthResponse`
 

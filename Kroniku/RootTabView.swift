@@ -44,12 +44,17 @@ struct RootTabView: View {
         .sheet(isPresented: $showsTier1Onboarding, onDismiss: handleOnboardingDismissed) {
             Tier1OnboardingView()
                 .environmentObject(contextController)
+                .environmentObject(tier2Controller)
         }
         .onAppear {
+            guard AuthService.shared.isAuthenticated else { return }
             if !contextController.consent.hasCompletedOnboarding && !contextController.consent.needsOnboardingResume {
                 showsTier1Onboarding = true
             }
-            runFullSync()
+            Task {
+                await contextController.pushDayPeriodsIfNeeded()
+                await contextController.pullDayPeriodsIfNeeded()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in
             runPushPending()
@@ -63,11 +68,6 @@ struct RootTabView: View {
     private func handleOnboardingDismissed() {
         guard !contextController.consent.hasCompletedOnboarding else { return }
         contextController.markOnboardingDismissed(at: contextController.consent.onboardingPage)
-    }
-
-    private func runFullSync() {
-        let coordinator = SyncCoordinator(repository: SwiftDataMemoryRepository(modelContext: modelContext))
-        Task { try? await coordinator.performFullSync() }
     }
 
     private func runPushPending() {

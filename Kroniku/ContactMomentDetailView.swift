@@ -676,6 +676,8 @@ struct ContactMomentDetailView: View {
             )
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
             event.updatedAt = Date()
+            event.backendVersion = max(1, event.backendVersion + 1)
+            event.syncedToBackendAt = nil
 
             do {
                 try modelContext.save()
@@ -705,6 +707,8 @@ struct ContactMomentDetailView: View {
                 ] + preservedMetadata
             )
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
+            event.backendVersion = max(1, event.backendVersion + 1)
+            event.syncedToBackendAt = nil
 
             modelContext.insert(cm)
 
@@ -758,58 +762,19 @@ struct ContactMomentDetailView: View {
     }
 
     private func attachmentThumbnail(_ attachment: PhotoAttachment) -> some View {
-        Group {
-            if let uiImage = UIImage(data: attachment.imageData) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.gray.opacity(0.15)
-                    .overlay(Image(systemName: "photo"))
-            }
-        }
-        .frame(width: 92, height: 92)
+        PhotoAttachmentThumbnail(attachment: attachment, size: CGSize(width: 92, height: 92))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func loadPhotoAttachments(from items: [PhotosPickerItem]) async {
         var newAttachments = photoAttachments
-        for (index, item) in items.enumerated() {
-            guard let data = try? await item.loadTransferable(type: Data.self),
-                  let normalizedData = normalizedImageData(from: data) else {
-                continue
-            }
-            let filename = item.itemIdentifier ?? "photo-\(index + 1).jpg"
-            let attachment = PhotoAttachment(filename: filename, imageData: normalizedData)
-            if !newAttachments.contains(where: { $0.filename == attachment.filename && $0.imageData.count == attachment.imageData.count }) {
+        for item in items {
+            guard let assetIdentifier = item.itemIdentifier else { continue }
+            let attachment = PhotoAttachment(assetIdentifier: assetIdentifier, filename: assetIdentifier)
+            if !newAttachments.contains(where: { $0.assetIdentifier == assetIdentifier }) {
                 newAttachments.append(attachment)
             }
         }
         photoAttachments = newAttachments
-    }
-
-    private func normalizedImageData(from data: Data) -> Data? {
-        guard let image = UIImage(data: data) else { return data }
-        let resized = image.kronikuScaled(maxDimension: 1400)
-        return resized.jpegData(compressionQuality: 0.62) ?? data
-    }
-}
-
-private extension UIImage {
-    func kronikuScaled(maxDimension: CGFloat) -> UIImage {
-        let width = size.width
-        let height = size.height
-        let longest = max(width, height)
-        guard longest > maxDimension else { return self }
-
-        let ratio = maxDimension / longest
-        let targetSize = CGSize(width: width * ratio, height: height * ratio)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = false
-        format.scale = 1
-
-        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: targetSize))
-        }
     }
 }

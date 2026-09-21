@@ -6,6 +6,7 @@ struct Tier1OnboardingView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var contextController: Tier1ContextController
+    @EnvironmentObject private var tier2Controller: Tier2ContextController
 
     @State private var currentPage = 0
 
@@ -20,10 +21,10 @@ struct Tier1OnboardingView: View {
                 VStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 10) {
                         KronikuLogoRow(subtitle: "Onboarding")
-                        Text("Context preferences")
+                        Text("Memory details")
                             .font(.system(size: 30, weight: .bold, design: .rounded))
                             .foregroundStyle(KronikuPalette.paper)
-                        Text("Pick exactly which context sources can enrich your memory timeline.")
+                        Text("Choose what Kroniku can use when it adds helpful details to your memories.")
                             .font(.subheadline)
                             .foregroundStyle(KronikuPalette.fog)
                     }
@@ -31,22 +32,24 @@ struct Tier1OnboardingView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
 
-                    TabView(selection: $currentPage) {
-                        onboardingPageOne
-                            .tag(0)
-                        onboardingPageTwo
-                            .tag(1)
-                        onboardingPageThree
-                            .tag(2)
+                    Group {
+                        switch currentPage {
+                        case 0:
+                            onboardingPageOne
+                        case 1:
+                            onboardingPageTwo
+                        default:
+                            onboardingPageThree
+                        }
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .always))
+                    .animation(.easeInOut, value: currentPage)
 
                     pageControls
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
             }
-            .navigationTitle("Context preferences")
+            .navigationTitle("Memory details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -65,6 +68,7 @@ struct Tier1OnboardingView: View {
         }
         .onAppear {
             contextController.refreshPermissions()
+            tier2Controller.refreshPermissions()
             currentPage = min(contextController.consent.onboardingPage, lastPage)
         }
         .onChange(of: currentPage) { _, newValue in
@@ -77,22 +81,22 @@ struct Tier1OnboardingView: View {
         ScrollView {
             VStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Context capture")
+                    Text("Around you")
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Text("Grant permission first. When you allow access, Kroniku enables nearby places, weather snapshots, and motion state by default.")
+                    Text("Allow these when you want memories to include nearby places, weather, and movement.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
                     permissionRow(
-                        title: "Location permission",
+                        title: "Location",
                         status: contextController.locationPermission,
                         action: { Task { await contextController.requestLocationPermission() } }
                     )
 
                     permissionRow(
-                        title: "Motion permission",
+                        title: "Motion",
                         status: contextController.motionPermission,
                         action: { Task { await contextController.requestMotionPermission() } }
                     )
@@ -104,13 +108,13 @@ struct Tier1OnboardingView: View {
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Toggle("Import calendar events", isOn: consentBinding(
+                    Toggle("Add events from Calendar", isOn: consentBinding(
                         get: { contextController.consent.calendarImportEnabled },
                         set: { contextController.setCalendarImportEnabled($0) },
                         syncCalendar: true
                     ))
 
-                    Toggle("Include attendees and locations", isOn: consentBinding(
+                    Toggle("Add people and places from Calendar", isOn: consentBinding(
                         get: { contextController.consent.calendarAttendeesAndLocationsEnabled },
                         set: { contextController.setCalendarAttendeeLocationEnabled($0) },
                         syncCalendar: true
@@ -122,7 +126,7 @@ struct Tier1OnboardingView: View {
                         .foregroundStyle(.secondary)
 
                     permissionRow(
-                        title: "Calendar permission",
+                        title: "Calendar access",
                         status: contextController.calendarPermission,
                         action: { Task { await contextController.requestCalendarPermission() } }
                     )
@@ -136,16 +140,16 @@ struct Tier1OnboardingView: View {
         ScrollView {
             VStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("HealthKit")
+                    Text("Health")
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Text("Grant permission first. Kroniku enables Steps, Heart rate, Sleep, and Mindful minutes by default after you allow access.")
+                    Text("Allow this when you want eligible memories to include activity, sleep, or mindfulness summaries.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
                     permissionRow(
-                        title: "HealthKit permission",
+                        title: "Health",
                         status: contextController.healthPermission,
                         canRetryWhenDenied: true,
                         action: { Task { await contextController.requestHealthPermission() } }
@@ -158,7 +162,7 @@ struct Tier1OnboardingView: View {
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Toggle("Allow photo attachments", isOn: consentBinding(
+                    Toggle("Attach photos", isOn: consentBinding(
                         get: { contextController.consent.photoAttachmentEnabled },
                         set: { contextController.setPhotoAttachmentEnabled($0) }
                     ))
@@ -176,30 +180,82 @@ struct Tier1OnboardingView: View {
         ScrollView {
             VStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("When")
+                    Text("Words and time")
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Toggle("When labels: sunrise, sunset, weekend, holiday", isOn: consentBinding(
+                    Toggle("Add time labels", isOn: consentBinding(
                         get: { contextController.consent.timeSemanticsEnabled },
                         set: { contextController.setTimeSemanticsEnabled($0) }
                     ))
 
-                    Text("Every source stays under per-source control in Settings. Turning one off removes retained data from existing memories for that source.")
+                    Toggle("Turn spoken notes into text", isOn: consentBinding(
+                        get: { contextController.consent.voiceTranscriptionEnabled },
+                        set: { contextController.setVoiceTranscriptionEnabled($0) }
+                    ))
+
+                    Toggle("Use notes shared to Kroniku", isOn: consentBinding(
+                        get: { contextController.consent.noteIngestionEnabled },
+                        set: { contextController.setNoteIngestionEnabled($0) }
+                    ))
+
+                    Text("Time labels include sunrise, sunset, weekends, and holidays. Shared notes are only used when you send them to Kroniku.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .kronikuCard(.semantics)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Resume anytime")
+                    Text("People and devices")
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
-                    Text("If you dismiss onboarding by mistake, use Settings to resume exactly where you left off.")
+
+                    Toggle("Match names to Contacts", isOn: consentBinding(
+                        get: { contextController.consent.contactsResolutionEnabled },
+                        set: { contextController.setContactsResolutionEnabled($0) }
+                    ))
+
+                    Toggle("Use nearby devices", isOn: consentBinding(
+                        get: { contextController.consent.bluetoothContextEnabled },
+                        set: { contextController.setBluetoothContextEnabled($0) }
+                    ))
+
+                    Text("Contacts are checked only when you ask Kroniku to match a name. Nearby devices can add details like car or headphones.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .kronikuCard(.calendar)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("More permissions")
+                        .font(.headline.weight(.semibold))
+                        .fontDesign(.rounded)
+
+                    permissionRow(
+                        title: "Microphone",
+                        status: tier2Controller.microphonePermission,
+                        action: { Task { await tier2Controller.requestMicrophonePermission() } }
+                    )
+
+                    permissionRow(
+                        title: "Speech recognition",
+                        status: tier2Controller.speechPermission,
+                        action: { Task { await tier2Controller.requestSpeechPermission() } }
+                    )
+
+                    permissionRow(
+                        title: "Contacts",
+                        status: tier2Controller.contactsPermission,
+                        action: { Task { await tier2Controller.requestContactsPermission() } }
+                    )
+
+                    permissionRow(
+                        title: "Bluetooth",
+                        status: tier2Controller.bluetoothPermission,
+                        action: { Task { await tier2Controller.requestBluetoothPermission() } }
+                    )
+                }
+                .kronikuCard(.context)
             }
         }
     }
@@ -269,14 +325,17 @@ struct Tier1OnboardingView: View {
             Spacer()
             if status == .notDetermined {
                 Button("Allow", action: action)
+                    .buttonStyle(.bordered)
             } else if status == .denied || status == .restricted {
                 if canRetryWhenDenied {
                     Button("Review access", action: action)
+                        .buttonStyle(.bordered)
                         .font(.caption.weight(.semibold))
                 } else {
                     Button("Open Settings") {
                         openAppSettings()
                     }
+                    .buttonStyle(.bordered)
                     .font(.caption.weight(.semibold))
                 }
             } else {

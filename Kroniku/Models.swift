@@ -31,6 +31,51 @@ struct Tier1HealthConsent: Codable, Hashable {
     }
 }
 
+struct DayPeriodSchedule: Codable, Hashable {
+    var morningStartMinutes: Int
+    var afternoonStartMinutes: Int
+    var earlyEveningStartMinutes: Int
+    var nightStartMinutes: Int
+
+    static let `default` = DayPeriodSchedule(
+        morningStartMinutes: 6 * 60,
+        afternoonStartMinutes: 12 * 60,
+        earlyEveningStartMinutes: 16 * 60,
+        nightStartMinutes: 21 * 60
+    )
+
+    var isValid: Bool {
+        morningStartMinutes < afternoonStartMinutes &&
+        afternoonStartMinutes < earlyEveningStartMinutes &&
+        earlyEveningStartMinutes < nightStartMinutes
+    }
+
+    func startMinutes(for period: DayPeriod) -> Int {
+        switch period {
+        case .morning: return morningStartMinutes
+        case .afternoon: return afternoonStartMinutes
+        case .earlyEvening: return earlyEveningStartMinutes
+        case .night: return nightStartMinutes
+        }
+    }
+}
+
+enum DayPeriod: String, CaseIterable, Codable, Hashable {
+    case morning
+    case afternoon
+    case earlyEvening
+    case night
+
+    var title: String {
+        switch self {
+        case .morning: return "Morning"
+        case .afternoon: return "Afternoon"
+        case .earlyEvening: return "Early evening"
+        case .night: return "Night"
+        }
+    }
+}
+
 struct HealthSummary: Codable, Hashable {
     struct Entry: Codable, Hashable, Identifiable {
         let id: UUID
@@ -54,12 +99,22 @@ struct HealthSummary: Codable, Hashable {
 
 struct PhotoAttachment: Codable, Hashable, Identifiable {
     let id: UUID
+    var assetIdentifier: String?
     var filename: String
-    var imageData: Data
+    var imageData: Data?
     var addedAt: Date
+
+    init(id: UUID = UUID(), assetIdentifier: String, filename: String, addedAt: Date = Date()) {
+        self.id = id
+        self.assetIdentifier = assetIdentifier
+        self.filename = filename
+        self.imageData = nil
+        self.addedAt = addedAt
+    }
 
     init(id: UUID = UUID(), filename: String, imageData: Data, addedAt: Date = Date()) {
         self.id = id
+        self.assetIdentifier = nil
         self.filename = filename
         self.imageData = imageData
         self.addedAt = addedAt
@@ -160,6 +215,12 @@ struct Tier1ConsentState: Codable, Hashable {
     var healthAuthorizationState: PermissionState = .notDetermined
     var photoAttachmentEnabled: Bool = false
     var timeSemanticsEnabled: Bool = true
+    // Optional keeps older UserDefaults consent blobs backward-compatible.
+    var dayPeriodSchedule: DayPeriodSchedule?
+    // Set whenever the schedule changes locally or is pulled from the backend; used for last-write-wins conflict resolution.
+    var dayPeriodScheduleUpdatedAt: Date?
+    // True while a local day-period change hasn't been confirmed as pushed to the backend yet.
+    var dayPeriodSchedulePendingSync: Bool = false
     var voiceTranscriptionEnabled: Bool = false
     var noteIngestionEnabled: Bool = false
     var contactsResolutionEnabled: Bool = false
@@ -167,6 +228,13 @@ struct Tier1ConsentState: Codable, Hashable {
     var hasCompletedOnboarding: Bool = false
     var needsOnboardingResume: Bool = false
     var onboardingPage: Int = 0
+
+    var effectiveDayPeriodSchedule: DayPeriodSchedule {
+        guard let dayPeriodSchedule, dayPeriodSchedule.isValid else {
+            return .default
+        }
+        return dayPeriodSchedule
+    }
 }
 
 // Extensible context card metadata attached to a memory event.

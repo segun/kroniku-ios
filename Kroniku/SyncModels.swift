@@ -2,6 +2,37 @@ import Foundation
 
 // MARK: - Sync API payloads
 
+struct SyncPlaceData: Codable, Equatable {
+    let name: String
+    let latitude: Double?
+    let longitude: Double?
+}
+
+struct SyncWeatherData: Codable, Equatable {
+    let observedAt: Date
+    let condition: String?
+    let temperatureC: Double?
+}
+
+struct SyncPhotoReference: Codable, Equatable {
+    let assetIdentifier: String
+    let filename: String?
+    let addedAt: Date
+}
+
+struct SyncEventContextData: Codable, Equatable {
+    let place: SyncPlaceData?
+    let weather: SyncWeatherData?
+    let motion: String?
+    let timeSemantics: [String]?
+    let photoReferences: [SyncPhotoReference]?
+
+    var isEmpty: Bool {
+        place == nil && weather == nil && motion == nil &&
+        (timeSemantics?.isEmpty ?? true) && (photoReferences?.isEmpty ?? true)
+    }
+}
+
 struct PushEventRequest: Codable {
     let eventId: String
     let version: Int
@@ -10,6 +41,7 @@ struct PushEventRequest: Codable {
     let title: String?
     let detail: String?
     let searchText: String?
+    let contextData: SyncEventContextData?
     let encryptedPayload: String
     let payloadHash: String
     let isDeleted: Bool
@@ -48,6 +80,7 @@ struct PullEventResponse: Codable, Equatable {
     let title: String?
     let detail: String?
     let searchText: String?
+    let contextData: SyncEventContextData?
     let encryptedPayload: String
     let payloadHash: String
     let isDeleted: Bool

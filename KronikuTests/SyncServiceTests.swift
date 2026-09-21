@@ -63,6 +63,7 @@ final class SyncServiceTests: XCTestCase {
           title: "Test",
           detail: nil,
           searchText: nil,
+          contextData: nil,
           encryptedPayload: "payload",
           payloadHash: "hash",
           isDeleted: false

@@ -3,6 +3,7 @@ import SwiftUI
 import EventKit
 import CoreLocation
 import CoreMotion
+import Photos
 #if canImport(HealthKit)
 import HealthKit
 #endif
@@ -175,11 +176,64 @@ final class Tier1ContextController: ObservableObject {
     }
 
     func setPhotoAttachmentEnabled(_ enabled: Bool) {
-        consentStore.update { $0.photoAttachmentEnabled = enabled }
+        guard enabled else {
+            consentStore.update { $0.photoAttachmentEnabled = false }
+            return
+        }
+
+        Task {
+            let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            consentStore.update {
+                $0.photoAttachmentEnabled = status == .authorized || status == .limited
+            }
+        }
     }
 
     func setTimeSemanticsEnabled(_ enabled: Bool) {
         consentStore.update { $0.timeSemanticsEnabled = enabled }
+    }
+
+    func setDayPeriodSchedule(_ schedule: DayPeriodSchedule) {
+        guard schedule.isValid else { return }
+        consentStore.update {
+            $0.dayPeriodSchedule = schedule
+            $0.dayPeriodScheduleUpdatedAt = Date()
+            $0.dayPeriodSchedulePendingSync = true
+        }
+        Task { await pushDayPeriodsIfNeeded() }
+    }
+
+    /// Best-effort push of an unsynced local day-period schedule; safe to call repeatedly (e.g. on app launch).
+    func pushDayPeriodsIfNeeded() async {
+        guard consent.dayPeriodSchedulePendingSync, let schedule = consent.dayPeriodSchedule else { return }
+        do {
+            let response = try await PreferencesService.shared.updateDayPeriods(schedule)
+            consentStore.update {
+                $0.dayPeriodSchedule = response.dayPeriods.schedule
+                $0.dayPeriodScheduleUpdatedAt = response.updatedAt
+                $0.dayPeriodSchedulePendingSync = false
+            }
+        } catch {
+            // Stays flagged as pending; retried on the next app launch or edit.
+            print("Day period preferences push failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Pulls the server-side day-period schedule and applies it locally unless an unsynced local edit is pending.
+    func pullDayPeriodsIfNeeded() async {
+        guard !consent.dayPeriodSchedulePendingSync else { return }
+        do {
+            let response = try await PreferencesService.shared.getPreferences()
+            if let localUpdatedAt = consent.dayPeriodScheduleUpdatedAt, localUpdatedAt >= response.updatedAt {
+                return
+            }
+            consentStore.update {
+                $0.dayPeriodSchedule = response.dayPeriods.schedule
+                $0.dayPeriodScheduleUpdatedAt = response.updatedAt
+            }
+        } catch {
+            print("Day period preferences pull failed: \(error.localizedDescription)")
+        }
     }
 
     func setVoiceTranscriptionEnabled(_ enabled: Bool) {

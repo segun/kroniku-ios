@@ -196,6 +196,6 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
     }
 
     func makePushRequest(for event: MemoryEvent) -> PushEventRequest {
-        PushEventRequest(eventId: event.backendEventId ?? event.id.uuidString, version: max(event.backendVersion, 1), occurredAt: event.occurredAt ?? event.updatedAt, source: event.source ?? "unknown", title: event.title, detail: event.detail, searchText: event.context, encryptedPayload: event.encryptedPayload ?? "", payloadHash: event.payloadHash ?? "", isDeleted: event.isDeleted)
+        PushEventRequest(eventId: event.backendEventId ?? event.id.uuidString, version: max(event.backendVersion, 1), occurredAt: event.occurredAt ?? event.updatedAt, source: event.source ?? "unknown", title: event.title, detail: event.detail, searchText: event.context, contextData: nil, encryptedPayload: event.encryptedPayload ?? "", payloadHash: event.payloadHash ?? "", isDeleted: event.isDeleted)
     }
 }

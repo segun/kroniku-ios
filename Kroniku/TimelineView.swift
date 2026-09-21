@@ -13,17 +13,17 @@ private enum TimelinePeriod: CaseIterable, Equatable {
         let accent: Color
     }
 
-    init(date: Date) {
-        let hour = Calendar.current.component(.hour, from: date)
-        switch hour {
-        case 0..<6, 21...23:
+    init(date: Date, schedule: DayPeriodSchedule = .default) {
+        let calendar = Calendar.current
+        let minutes = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
+        if minutes >= schedule.nightStartMinutes || minutes < schedule.morningStartMinutes {
             self = .night
-        case 6..<12:
-            self = .morning
-        case 12..<17:
-            self = .afternoon
-        default:
+        } else if minutes >= schedule.earlyEveningStartMinutes {
             self = .earlyEvening
+        } else if minutes >= schedule.afternoonStartMinutes {
+            self = .afternoon
+        } else {
+            self = .morning
         }
     }
 
@@ -117,6 +117,7 @@ struct TimelineView: View {
     @State private var actionEvent: MemoryEvent?
     @State private var isRefreshing = false
     @State private var refreshStatus: String?
+    @State private var refreshStatusID = UUID()
 
     private let calendar = Calendar.current
 
@@ -125,7 +126,11 @@ struct TimelineView: View {
     }
 
     private var currentPeriod: TimelinePeriod {
-        TimelinePeriod(date: Date())
+        TimelinePeriod(date: Date(), schedule: contextController.consent.effectiveDayPeriodSchedule)
+    }
+
+    private var periodSchedule: DayPeriodSchedule {
+        contextController.consent.effectiveDayPeriodSchedule
     }
 
     private var filteredEvents: [MemoryEvent] {
@@ -217,7 +222,8 @@ struct TimelineView: View {
                             ForEach(Array(sortedEvents.enumerated()), id: \.element.id) { index, event in
                                 TimelineRow(
                                     event: event,
-                                    nextEvent: index + 1 < sortedEvents.count ? sortedEvents[index + 1] : nil
+                                    nextEvent: index + 1 < sortedEvents.count ? sortedEvents[index + 1] : nil,
+                                    schedule: periodSchedule
                                 )
                                     .contentShape(Rectangle())
                                     .onTapGesture {
@@ -259,7 +265,7 @@ struct TimelineView: View {
                                 LazyVStack(spacing: 10) {
                                     ForEach(sortedHiddenEvents) { event in
                                         ZStack(alignment: .topTrailing) {
-                                            TimelineRow(event: event)
+                                            TimelineRow(event: event, schedule: periodSchedule)
                                                 .opacity(0.56)
                                             Text("Hidden")
                                                 .font(.caption2.weight(.bold))
@@ -330,16 +336,13 @@ struct TimelineView: View {
             }
         }
         .overlay(alignment: .top) {
-            if isRefreshing || refreshStatus != nil {
+            if refreshStatus != nil {
                 HStack(spacing: 9) {
-                    if isRefreshing {
-                        ProgressView()
-                            .tint(KronikuPalette.paper)
-                    } else {
-                        Image(systemName: "exclamationmark.circle")
+                    Image(systemName: "exclamationmark.circle")
+                    if let refreshStatus {
+                        Text(refreshStatus)
+                            .font(.caption.weight(.semibold))
                     }
-                    Text("")
-                        .font(.caption.weight(.semibold))
                 }
                 .foregroundStyle(KronikuPalette.paper)
                 .padding(.horizontal, 14)
@@ -524,6 +527,7 @@ struct TimelineView: View {
 
         await MainActor.run {
             refreshStatus = nil
+            refreshStatusID = UUID()
             withAnimation(.easeOut(duration: 0.18)) {
                 isRefreshing = true
             }
@@ -543,10 +547,25 @@ struct TimelineView: View {
         } catch {
             print("Timeline refresh failed: \(error.localizedDescription)")
             await MainActor.run {
-                refreshStatus = "Sync failed"
+                showRefreshFailureNotification()
                 withAnimation(.easeIn(duration: 0.18)) {
                     isRefreshing = false
                 }
+            }
+        }
+    }
+
+    @MainActor
+    private func showRefreshFailureNotification() {
+        let statusID = UUID()
+        refreshStatusID = statusID
+        refreshStatus = "Refresh failed"
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            guard refreshStatusID == statusID else { return }
+            withAnimation(.easeIn(duration: 0.18)) {
+                refreshStatus = nil
             }
         }
     }
@@ -604,19 +623,21 @@ private struct TimelineEventActionSheet: View {
 private struct TimelineRow: View {
     let event: MemoryEvent
     let nextEvent: MemoryEvent?
+    let schedule: DayPeriodSchedule
 
-    init(event: MemoryEvent, nextEvent: MemoryEvent? = nil) {
+    init(event: MemoryEvent, nextEvent: MemoryEvent? = nil, schedule: DayPeriodSchedule = .default) {
         self.event = event
         self.nextEvent = nextEvent
+        self.schedule = schedule
     }
 
     private var period: TimelinePeriod {
-        TimelinePeriod(date: event.occurredAt ?? Date())
+        TimelinePeriod(date: event.occurredAt ?? Date(), schedule: schedule)
     }
 
     private var nextPeriod: TimelinePeriod? {
         guard let nextDate = nextEvent?.occurredAt else { return nil }
-        return TimelinePeriod(date: nextDate)
+        return TimelinePeriod(date: nextDate, schedule: schedule)
     }
 
     private var periodPalette: TimelinePeriod.Palette {
@@ -659,7 +680,11 @@ private struct TimelineRow: View {
         }
         return AnyShapeStyle(
             LinearGradient(
-                colors: [periodPalette.background, nextPeriod.palette.background],
+                colors: [
+                    periodPalette.background,
+                    periodPalette.background.opacity(0.72),
+                    nextPeriod.palette.background.opacity(0.38)
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -924,6 +949,7 @@ private struct TimelineRow: View {
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(timeOfDayFill))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)

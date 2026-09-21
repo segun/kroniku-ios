@@ -18,7 +18,7 @@ struct KronikuApp: App {
                         withAnimation { hasCompletedWelcome = true }
                     }
                 } else if isAuthenticated {
-                    RootTabView(isAuthenticated: $isAuthenticated)
+                    AuthenticatedRootView(isAuthenticated: $isAuthenticated)
                 } else {
                     AuthView(isAuthenticated: $isAuthenticated)
                 }
@@ -37,6 +37,21 @@ struct KronikuApp: App {
         } else {
             isAuthenticated = false
         }
+    }
+}
+
+private struct AuthenticatedRootView: View {
+    @Binding var isAuthenticated: Bool
+    @Environment(\.modelContext) private var modelContext
+
+    var body: some View {
+        RootTabView(isAuthenticated: $isAuthenticated)
+            .task {
+                let coordinator = SyncCoordinator(
+                    repository: SwiftDataMemoryRepository(modelContext: modelContext)
+                )
+                try? await coordinator.performFullSync()
+            }
     }
 }
 
