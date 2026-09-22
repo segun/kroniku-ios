@@ -171,6 +171,17 @@ struct VisitSnapshot: Codable, Hashable {
     var capturedAt: Date
 }
 
+struct DerivedEventDraft: Hashable {
+    var source: String
+    var title: String
+    var detail: String?
+    var occurredAt: Date
+    var endedAt: Date
+    var motion: MotionState?
+    var place: VisitSnapshot?
+    var confidenceScore: Double?
+}
+
 struct WeatherReading: Codable, Hashable {
     var observedAt: Date
     var condition: String
@@ -291,6 +302,8 @@ final class MemoryEvent: Identifiable {
     var payloadHash: String?
     var encryptedPayload: String?
     var isDeleted: Bool = false
+    // Only meaningful for calendar-sourced events: whether attendee/location sharing consent allows this event to sync.
+    var calendarSyncEligible: Bool = false
 
     @Relationship(inverse: \ContactMoment.memoryEvent) var contactMoment: ContactMoment?
     var place: Place?
@@ -299,9 +312,10 @@ final class MemoryEvent: Identifiable {
     var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false, calendarSyncEligible: Bool = false) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
+        self.calendarSyncEligible = calendarSyncEligible
         self.occurredAt = occurredAt
         self.source = source
         self.title = title

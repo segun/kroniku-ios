@@ -44,6 +44,10 @@ struct ContactMomentCaptureView: View {
     @State private var photoAttachments: [PhotoAttachment] = []
     @State private var manualEntryShown = false
 
+    init(prelinkedEventIDs: Set<UUID> = []) {
+        _linkedEventIDs = State(initialValue: prelinkedEventIDs)
+    }
+
     private var trimmedNote: String {
         note.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -331,12 +335,12 @@ struct ContactMomentCaptureView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { focusedField = nil; dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button(isListening ? "Continue" : "Save") {
                         focusedField = nil
-                        Task { await saveContactMoment() }
+                        Task { await continueOrSave() }
                     }
                         .fontWeight(.semibold)
-                        .disabled(!canSave || isSaving)
+                        .disabled((!isListening && !canSave) || isSaving)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
@@ -535,6 +539,22 @@ struct ContactMomentCaptureView: View {
         } catch {
             saveErrorMessage = error.localizedDescription
         }
+    }
+
+    private func continueOrSave() async {
+        if isListening {
+            voiceTranscript = await tier2Controller.stopRecording()
+            isListening = false
+
+            guard await extractFromTranscript() else {
+                return
+            }
+            didApplyVoiceDetails = true
+            voiceTranscript = ""
+            return
+        }
+
+        await saveContactMoment()
     }
 
     private var attachmentStrip: some View {

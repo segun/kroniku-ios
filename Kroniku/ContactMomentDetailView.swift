@@ -11,6 +11,7 @@ struct ContactMomentDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var contextController: Tier1ContextController
+    @EnvironmentObject private var tier2Controller: Tier2ContextController
     @Query(sort: \MemoryEvent.occurredAt, order: .reverse) private var allEvents: [MemoryEvent]
     @FocusState private var focusedField: FocusField?
 
@@ -18,7 +19,15 @@ struct ContactMomentDetailView: View {
 
     @State private var contactNames: [String] = []
     @State private var contactNameInput: String = ""
+    @State private var resolvedContactIdentifiers: [String: String] = [:]
+    @State private var resolvingContactName: String?
+    @State private var pendingContactResolutionQueue: [String] = []
+    @State private var resolutionCandidates: [Tier2ResolvedPerson] = []
+    @State private var isShowingResolutionPicker = false
+    @State private var resolutionStatusMessage: String?
     @State private var note: String = ""
+    @State private var weatherCondition: String = ""
+    @State private var weatherTemperature: String = ""
     @State private var interaction: Interaction = .moment
     @State private var occurredAt: Date = Date()
     @State private var endedAt: Date?
@@ -41,12 +50,36 @@ struct ContactMomentDetailView: View {
     private var detailMetadata: [ContextCard.MetadataEntry] {
         let metadata = event.contextCard?.metadata ?? []
         return metadata.filter { entry in
-            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit" || entry.key == "contacts" || entry.key == "endedAt")
+            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit" || entry.key == "contacts" || entry.key == "userNote" || entry.key == "endedAt")
         }
     }
 
     private var trimmedContactNameInput: String {
         contactNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isContactMoment: Bool {
+        event.source == "contactMoment" || event.contactMoment != nil
+    }
+
+    private var eventKindTitle: String {
+        switch event.source {
+        case "workout": return "Workout"
+        case "trip": return event.title?.hasPrefix("Arrived at ") == true ? "Arrival" : "Trip"
+        case "calendar": return "Calendar event"
+        case "contactMoment": return "Memory"
+        default: return "Event"
+        }
+    }
+
+    private var eventKindSubtitle: String {
+        switch event.source {
+        case "workout": return "Health activity"
+        case "trip": return "Motion and location"
+        case "calendar": return "Imported calendar details"
+        case "contactMoment": return isEditing ? "Edit" : "Details"
+        default: return "Details"
+        }
     }
 
     private var hasValidTimeRange: Bool {
@@ -55,8 +88,15 @@ struct ContactMomentDetailView: View {
     }
 
     private var canSaveEdits: Bool {
+        if !isContactMoment {
+            return weatherTemperature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || parsedTemperature != nil
+        }
         let hasContent = !(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && contactNames.isEmpty)
         return hasContent && hasValidTimeRange
+    }
+
+    private var parsedTemperature: Double? {
+        Double(weatherTemperature.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "."))
     }
 
     private var timeRangeText: String {
@@ -89,19 +129,36 @@ struct ContactMomentDetailView: View {
         // initialize states from linked contact moment if available
         if let cm = event.contactMoment {
             let names = cm.contactNames.isEmpty ? [cm.personName].compactMap { $0 } : cm.contactNames
+            var resolvedIdentifiers: [String: String] = [:]
+            for (name, identifier) in zip(names, cm.resolvedContactIdentifiers) {
+                resolvedIdentifiers[name] = identifier
+            }
             _contactNames = State(initialValue: names)
+            _resolvedContactIdentifiers = State(initialValue: resolvedIdentifiers)
             _note = State(initialValue: cm.note)
             _interaction = State(initialValue: Interaction(rawValue: cm.interactionType) ?? .moment)
             _occurredAt = State(initialValue: cm.occurredAt)
             _endedAt = State(initialValue: cm.endedAt)
             _hasEndTime = State(initialValue: cm.endedAt != nil)
             _endTimeDraft = State(initialValue: cm.endedAt ?? cm.occurredAt)
-        } else {
-            // fallback to MemoryEvent fields
+        } else if event.source == "contactMoment" {
             _contactNames = State(initialValue: [event.detail].compactMap { $0 }.filter { !$0.isEmpty })
             _note = State(initialValue: event.title ?? "")
             _occurredAt = State(initialValue: event.occurredAt ?? Date())
+        } else {
+            let metadata = Dictionary(
+                (event.contextCard?.metadata ?? []).map { ($0.key, $0.value) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            _contactNames = State(initialValue: metadata["contacts"]?.split(separator: ",").map(String.init) ?? [])
+            _note = State(initialValue: metadata["userNote"] ?? "")
+            _occurredAt = State(initialValue: event.occurredAt ?? Date())
+            _endedAt = State(initialValue: event.derivedEndedAt)
+            _hasEndTime = State(initialValue: event.derivedEndedAt != nil)
+            _endTimeDraft = State(initialValue: event.derivedEndedAt ?? event.occurredAt ?? Date())
         }
+        _weatherCondition = State(initialValue: event.weatherSnapshot?.condition ?? "")
+        _weatherTemperature = State(initialValue: event.weatherSnapshot?.temperatureC.map { String(format: "%.1f", $0) } ?? "")
         _photoAttachments = State(initialValue: event.photoAttachments)
     }
 
@@ -113,11 +170,11 @@ struct ContactMomentDetailView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(event.isReadOnlySource ? "Calendar detail" : "Moment")
+                        Text(eventKindTitle)
                             .font(.title2.weight(.bold))
                             .fontDesign(.rounded)
                             .foregroundStyle(KronikuPalette.paper)
-                        Text(event.isReadOnlySource ? "Read-only source metadata" : (isEditing ? "Edit" : "Details"))
+                        Text(eventKindSubtitle)
                             .font(.subheadline)
                             .foregroundStyle(KronikuPalette.fog)
                     }
@@ -125,31 +182,21 @@ struct ContactMomentDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(KronikuPalette.heroGradient, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
 
-                    if event.isReadOnlySource {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("Imported from calendar", systemImage: "calendar.badge.clock")
-                                .font(.headline.weight(.semibold))
-                                .fontDesign(.rounded)
-
-                            if let contextCard = event.contextCard {
-                                ForEach(contextCard.metadata) { entry in
-                                    if entry.key == "location" {
-                                        metadataRow(title: entry.key, value: entry.value, action: {
-                                            openMapChooser(query: entry.value, coordinate: nil)
-                                        })
-                                    } else {
-                                        metadataRow(title: entry.key, value: entry.value)
-                                    }
-                                }
+                    if isContactMoment {
+                        Group {
+                            if isEditing {
+                                editModeContent
+                            } else {
+                                viewModeContent
                             }
                         }
                         .kronikuCard()
                     } else {
                         Group {
                             if isEditing {
-                                editModeContent
+                                systemEventEditContent
                             } else {
-                                viewModeContent
+                                systemEventContent
                             }
                         }
                         .kronikuCard()
@@ -159,7 +206,7 @@ struct ContactMomentDetailView: View {
                 .padding(.vertical, 10)
             }
         }
-        .navigationTitle("Moment")
+        .navigationTitle(eventKindTitle)
         .navigationBarTitleDisplayMode(.inline)
         .scrollDismissesKeyboard(.interactively)
         .toolbar {
@@ -200,6 +247,26 @@ struct ContactMomentDetailView: View {
         .onChange(of: selectedPhotoItems) { _, newItems in
             Task {
                 await loadPhotoAttachments(from: newItems)
+            }
+        }
+        .confirmationDialog("Choose contact", isPresented: $isShowingResolutionPicker, titleVisibility: .visible) {
+            ForEach(resolutionCandidates, id: \.identifier) { candidate in
+                Button {
+                    applyResolvedContact(candidate)
+                } label: {
+                    if let hint = candidate.disambiguationHint, !hint.isEmpty {
+                        Text("\(candidate.displayName) - \(hint)")
+                    } else {
+                        Text(candidate.displayName)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                resolutionStatusMessage = "No contact selected for \(resolvingContactName ?? "that name")."
+                resolvingContactName = nil
+                Task {
+                    await processNextPendingContactResolution()
+                }
             }
         }
         .sheet(isPresented: $showsMapChooser) {
@@ -355,6 +422,156 @@ struct ContactMomentDetailView: View {
         }
     }
 
+    private var systemEventContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let title = event.title, !title.isEmpty {
+                iconValueRow(systemImage: event.symbolName ?? systemEventIcon, value: title)
+            }
+
+            iconValueRow(systemImage: "calendar.badge.clock", value: systemEventTimeRangeText)
+
+            if let detail = event.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+                detailRow(title: systemEventDetailLabel, value: detail)
+            }
+
+            if !contactNames.isEmpty {
+                detailRow(title: "People", value: contactNames.joined(separator: ", "))
+            }
+
+            if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                detailRow(title: "Note", value: note)
+            }
+
+            contextSummary
+
+            if !linkedEvents.isEmpty {
+                detailRow(title: "Related", value: "\(linkedEvents.count) event\(linkedEvents.count == 1 ? "" : "s")")
+            }
+        }
+    }
+
+    private var systemEventEditContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let title = event.title, !title.isEmpty {
+                iconValueRow(systemImage: event.symbolName ?? systemEventIcon, value: title)
+            }
+            iconValueRow(systemImage: "calendar.badge.clock", value: systemEventTimeRangeText)
+            if let detail = event.detail, !detail.isEmpty {
+                detailRow(title: systemEventDetailLabel, value: detail)
+            }
+
+            peopleEditField
+
+            fieldBlock(title: "What happened") {
+                TextEditor(text: $note)
+                    .frame(minHeight: 120)
+                    .focused($focusedField, equals: .note)
+                    .padding(6)
+                    .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            weatherEditFields
+
+            if contextController.consent.photoAttachmentEnabled {
+                fieldBlock(title: "Photos") {
+                    PhotosPicker(selection: $selectedPhotoItems, maxSelectionCount: 6, matching: .images) {
+                        Label(photoAttachments.isEmpty ? "Link photos" : "Update photos", systemImage: "photo.on.rectangle.angled")
+                    }
+                    .buttonStyle(.bordered)
+                    if !photoAttachments.isEmpty { attachmentStrip }
+                }
+            }
+        }
+    }
+
+    private var peopleEditField: some View {
+        fieldBlock(title: "People") {
+            VStack(alignment: .leading, spacing: 10) {
+                if !contactNames.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(contactNames, id: \.self) { name in
+                            HStack(spacing: 4) {
+                                Text(name).font(.caption.weight(.semibold))
+                                Button {
+                                    contactNames.removeAll { $0 == name }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(KronikuPalette.sand, in: Capsule())
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("Add a person", text: $contactNameInput)
+                        .textFieldStyle(.plain)
+                        .focused($focusedField, equals: .contactName)
+                        .padding(12)
+                        .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .onSubmit { addContactName() }
+                    Button { addContactName() } label: {
+                        Image(systemName: "plus.circle.fill").font(.title2)
+                    }
+                    .disabled(trimmedContactNameInput.isEmpty)
+                }
+            }
+        }
+    }
+
+    private var weatherEditFields: some View {
+        fieldBlock(title: "Weather") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("Condition, e.g. Partly cloudy", text: $weatherCondition)
+                    .textFieldStyle(.plain)
+                    .padding(12)
+                    .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                HStack {
+                    TextField("Temperature", text: $weatherTemperature)
+                        .keyboardType(.decimalPad)
+                        .textFieldStyle(.plain)
+                    Text("°C").foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                if !weatherTemperature.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && parsedTemperature == nil {
+                    Text("Enter a valid temperature.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private var systemEventIcon: String {
+        switch event.source {
+        case "workout": return "figure.walk"
+        case "trip": return event.title?.hasPrefix("Arrived at ") == true ? "mappin.and.ellipse" : "car"
+        case "calendar": return "calendar"
+        default: return "circle.dotted"
+        }
+    }
+
+    private var systemEventTimeRangeText: String {
+        guard let start = event.occurredAt else { return "Time unavailable" }
+        let startText = start.formatted(.dateTime.weekday().month().day().hour().minute())
+        guard let end = event.derivedEndedAt else { return startText }
+        if Calendar.current.isDate(start, inSameDayAs: end) {
+            return "\(startText) - \(end.formatted(.dateTime.hour().minute()))"
+        }
+        return "\(startText) - \(end.formatted(.dateTime.weekday().month().day().hour().minute()))"
+    }
+
+    private var systemEventDetailLabel: String {
+        if event.source == "workout" { return "Duration" }
+        if event.source == "trip", event.title?.hasPrefix("Arrived at ") == true { return "Stop duration" }
+        if event.source == "trip" { return "Route" }
+        return "Details"
+    }
+
     private var editModeContent: some View {
         VStack(spacing: 12) {
             fieldBlock(title: "Type") {
@@ -397,10 +614,15 @@ struct ContactMomentDetailView: View {
                         HStack(spacing: 8) {
                             ForEach(contactNames, id: \.self) { name in
                                 HStack(spacing: 4) {
+                                    if resolvedContactIdentifiers[name] != nil {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.caption2)
+                                    }
                                     Text(name)
                                         .font(.caption.weight(.semibold))
                                     Button {
                                         contactNames.removeAll { $0 == name }
+                                        resolvedContactIdentifiers[name] = nil
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
                                     }
@@ -429,6 +651,26 @@ struct ContactMomentDetailView: View {
                         }
                         .disabled(trimmedContactNameInput.isEmpty)
                     }
+
+                    if contextController.consent.contactsResolutionEnabled {
+                        Button {
+                            focusedField = nil
+                            Task {
+                                await resolveContactsFromContactsApp()
+                            }
+                        } label: {
+                            Label("Match with Contacts", systemImage: "person.crop.circle.badge.checkmark")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(contactNames.isEmpty)
+                    }
+
+                    if let resolutionStatusMessage {
+                        Text(resolutionStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -439,6 +681,8 @@ struct ContactMomentDetailView: View {
                     .padding(6)
                     .background(KronikuPalette.sand, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+
+            weatherEditFields
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("Photos")
@@ -738,13 +982,15 @@ struct ContactMomentDetailView: View {
             hasEndTime = cm.endedAt != nil
             endTimeDraft = cm.endedAt ?? cm.occurredAt
         } else {
-            contactNames = [event.detail].compactMap { $0 }.filter { !$0.isEmpty }
-            note = event.title ?? ""
+            contactNames = metadataByKey["contacts"]?.split(separator: ",").map(String.init) ?? []
+            note = metadataByKey["userNote"] ?? ""
             interaction = .moment
             occurredAt = event.occurredAt ?? Date()
-            endedAt = nil
-            hasEndTime = false
+            endedAt = event.derivedEndedAt
+            hasEndTime = event.derivedEndedAt != nil
         }
+        weatherCondition = event.weatherSnapshot?.condition ?? ""
+        weatherTemperature = event.weatherSnapshot?.temperatureC.map { String(format: "%.1f", $0) } ?? ""
         contactNameInput = ""
         photoAttachments = event.photoAttachments
         selectedPhotoItems = []
@@ -770,10 +1016,12 @@ struct ContactMomentDetailView: View {
             cm.interactionType = interaction.rawValue
             cm.occurredAt = occurredAt
             cm.endedAt = endedAt
+            cm.resolvedContactIdentifiers = contactNames.compactMap { resolvedContactIdentifiers[$0] }
             cm.updatedAt = Date()
 
             // keep MemoryEvent in sync
             event.occurredAt = occurredAt
+            event.source = "contactMoment"
             event.title = note
             event.detail = contactNames.isEmpty ? nil : contactNames.joined(separator: ", ")
             event.context = searchText
@@ -793,6 +1041,8 @@ struct ContactMomentDetailView: View {
             event.backendVersion = max(1, event.backendVersion + 1)
             event.syncedToBackendAt = nil
 
+            applyEditedWeather()
+
             do {
                 try modelContext.save()
                 NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
@@ -800,42 +1050,113 @@ struct ContactMomentDetailView: View {
                 print("Failed to save updates: \(error)")
             }
         } else {
-            // create new contact moment and link it
-            let cm = ContactMoment(personName: contactNames.first, interactionType: interaction.rawValue, occurredAt: occurredAt, endedAt: endedAt, note: note, captureMethod: "typed", contactNames: contactNames)
-            cm.memoryEvent = event
-            event.contactMoment = cm
-
-            // update event fields
-            event.occurredAt = occurredAt
-            event.title = note
-            event.detail = contactNames.isEmpty ? nil : contactNames.joined(separator: ", ")
-            event.context = searchText
-            let preservedMetadata = detailMetadata
-            event.contextCard = ContextCard(
-                source: "contactMoment",
-                category: "moment",
-                summary: note,
-                metadata: [
-                    .init(key: "interactionType", value: interaction.rawValue),
-                    .init(key: "captureMethod", value: "typed")
-                ] + contactsMetadata + preservedMetadata
+            var metadata = event.contextCard?.metadata ?? []
+            metadata.removeAll { $0.key == "userNote" || $0.key == "contacts" }
+            let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedNote.isEmpty {
+                metadata.append(.init(key: "userNote", value: trimmedNote))
+            }
+            if !contactNames.isEmpty {
+                metadata.append(.init(key: "contacts", value: contactNames.joined(separator: ",")))
+            }
+            var card = event.contextCard ?? ContextCard(
+                source: event.source ?? "derived",
+                category: "derived",
+                summary: event.detail ?? event.title ?? "Activity"
             )
-            event.symbolName = interaction.symbol
+            card.metadata = metadata
+            event.contextCard = card
+            event.context = ([event.title, trimmedNote] + contactNames).compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
+            applyEditedWeather()
+            event.updatedAt = Date()
             event.backendVersion = max(1, event.backendVersion + 1)
             event.syncedToBackendAt = nil
-
-            modelContext.insert(cm)
 
             do {
                 try modelContext.save()
                 NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
             } catch {
-                print("Failed to create contact moment: \(error)")
+                print("Failed to save activity context: \(error)")
             }
         }
 
         dismiss()
+    }
+
+    private func applyEditedWeather() {
+        let condition = weatherCondition.trimmingCharacters(in: .whitespacesAndNewlines)
+        let temperature = parsedTemperature
+        guard !condition.isEmpty || temperature != nil else {
+            event.weatherSnapshot = nil
+            return
+        }
+        if let weather = event.weatherSnapshot {
+            weather.condition = condition.isEmpty ? nil : condition
+            weather.temperatureC = temperature
+            weather.observedAt = event.occurredAt ?? Date()
+        } else {
+            event.weatherSnapshot = WeatherSnapshot(
+                observedAt: event.occurredAt ?? Date(),
+                condition: condition.isEmpty ? nil : condition,
+                temperatureC: temperature
+            )
+        }
+    }
+
+    private func resolveContactsFromContactsApp() async {
+        guard contextController.consent.contactsResolutionEnabled else { return }
+
+        if tier2Controller.contactsPermission == .notDetermined {
+            await tier2Controller.requestContactsPermission()
+        }
+        guard tier2Controller.contactsPermission == .authorized else {
+            resolutionStatusMessage = "Contacts permission is required to match people."
+            return
+        }
+
+        pendingContactResolutionQueue = contactNames.filter { resolvedContactIdentifiers[$0] == nil }
+        await processNextPendingContactResolution()
+    }
+
+    private func processNextPendingContactResolution() async {
+        guard !pendingContactResolutionQueue.isEmpty else {
+            resolutionStatusMessage = "Matched contacts where possible."
+            return
+        }
+
+        let name = pendingContactResolutionQueue.removeFirst()
+        guard resolvedContactIdentifiers[name] == nil else {
+            await processNextPendingContactResolution()
+            return
+        }
+
+        let matches = await tier2Controller.resolvePeople(named: name, limit: 5)
+        if matches.isEmpty {
+            await processNextPendingContactResolution()
+            return
+        }
+        if matches.count == 1, let only = matches.first {
+            resolvedContactIdentifiers[name] = only.identifier
+            await processNextPendingContactResolution()
+            return
+        }
+
+        resolvingContactName = name
+        resolutionCandidates = matches
+        isShowingResolutionPicker = true
+        resolutionStatusMessage = "Multiple matches for \(name). Choose one."
+    }
+
+    private func applyResolvedContact(_ person: Tier2ResolvedPerson) {
+        if let name = resolvingContactName {
+            resolvedContactIdentifiers[name] = person.identifier
+        }
+        resolvingContactName = nil
+        resolutionStatusMessage = "Matched from your contacts."
+        Task {
+            await processNextPendingContactResolution()
+        }
     }
 
     private func deleteBoth() {

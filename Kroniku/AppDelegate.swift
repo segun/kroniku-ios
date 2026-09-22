@@ -17,9 +17,12 @@ final class KronikuAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
 
         UNUserNotificationCenter.current().delegate = self
         startCorrelator()
-        resumeMonitoringIfConsented()
 
         return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        resumeMonitoringIfConsented()
     }
 
     /// Reuses `KronikuModelContainer.shared` — a second, independently created `ModelContainer` for the
@@ -27,8 +30,11 @@ final class KronikuAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
     private func startCorrelator() {
         let repository = SwiftDataMemoryRepository(modelContext: KronikuModelContainer.shared.mainContext)
         let correlator = TripCorrelator(repository: repository)
-        correlator.start()
         self.correlator = correlator
+        Task {
+            await correlator.start()
+            resumeMonitoringIfConsented()
+        }
     }
 
     private func resumeMonitoringIfConsented() {
@@ -51,6 +57,13 @@ final class KronikuAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
            let longitude = userInfo["longitude"] as? Double {
             Task { @MainActor in
                 NotificationCenter.default.post(name: .namePlaceRequested, object: nil, userInfo: ["latitude": latitude, "longitude": longitude])
+            }
+        }
+        if userInfo["kind"] as? String == "tripStop",
+           let eventIDRaw = userInfo["eventID"] as? String,
+           let eventID = UUID(uuidString: eventIDRaw) {
+            Task { @MainActor in
+                NotificationCenter.default.post(name: .tripStopContextRequested, object: nil, userInfo: ["eventID": eventID])
             }
         }
         completionHandler()

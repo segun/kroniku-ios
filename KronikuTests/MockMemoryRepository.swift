@@ -76,7 +76,8 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         events.append(me)
     }
 
-    func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws {
+    @discardableResult
+    func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws -> MemoryEvent {
         var metadata: [ContextCard.MetadataEntry] = []
         if let motion {
             metadata.append(.init(key: "motion", value: motion.rawValue))
@@ -95,9 +96,30 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
             event.place = Place(name: place.name, latitude: place.coordinate.latitude, longitude: place.coordinate.longitude)
         }
         events.append(event)
+        return event
     }
 
-    func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws {
+    func reconcileDerivedEvents(_ drafts: [DerivedEventDraft], in interval: DateInterval) throws {
+        events.removeAll { event in
+            guard event.source == "trip" || event.source == "workout", let start = event.occurredAt else { return false }
+            let end = event.derivedEndedAt ?? start
+            return start < interval.end && end > interval.start
+        }
+        for draft in drafts {
+            _ = try addDerivedEvent(
+                source: draft.source,
+                title: draft.title,
+                detail: draft.detail,
+                occurredAt: draft.occurredAt,
+                endedAt: draft.endedAt,
+                motion: draft.motion,
+                place: draft.place,
+                confidenceScore: draft.confidenceScore
+            )
+        }
+    }
+
+    func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date, attendeeLocationSharingEnabled: Bool) throws {
         let calendar = Calendar.current
         let importedIDs = Set(imported.map(\.externalID))
         events.removeAll {
@@ -116,6 +138,7 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
                 events[index].occurredAt = item.startsAt
                 events[index].detail = item.locationName
                 events[index].context = "calendar"
+                events[index].calendarSyncEligible = attendeeLocationSharingEnabled
             } else {
                 events.append(MemoryEvent(
                     externalSourceID: item.externalID,
@@ -127,7 +150,8 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
                     context: "calendar",
                     contextCard: ContextCard(source: "calendar", category: "schedule", summary: item.title),
                     symbolName: "calendar",
-                    colorName: "orange"
+                    colorName: "orange",
+                    calendarSyncEligible: attendeeLocationSharingEnabled
                 ))
             }
         }
@@ -190,7 +214,7 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
     }
 
     func fetchUnsyncedEvents() -> [MemoryEvent] {
-        events.filter { !$0.isReadOnlySource && !$0.isDeleted && $0.syncedToBackendAt == nil }
+        events.filter { (!$0.isReadOnlySource || $0.calendarSyncEligible) && !$0.isDeleted && $0.syncedToBackendAt == nil }
     }
 
     func markSynced(eventId: String, version: Int, syncedAt: Date) throws {

@@ -1,6 +1,10 @@
 import SwiftUI
 import SwiftData
 
+extension Notification.Name {
+    static let tripStopContextRequested = Notification.Name("tripStopContextRequested")
+}
+
 struct RootTabView: View {
     @Binding var isAuthenticated: Bool
     @Environment(\.modelContext) private var modelContext
@@ -8,6 +12,7 @@ struct RootTabView: View {
     @State private var showsCapture = false
     @State private var showsTier1Onboarding = false
     @State private var pendingPlaceCoordinate: GeoCoordinate?
+    @State private var captureLinkedEventIDs: Set<UUID> = []
     @StateObject private var contextController = Tier1ContextController()
     @StateObject private var tier2Controller = Tier2ContextController()
 
@@ -16,10 +21,6 @@ struct RootTabView: View {
             TimelineView(showsCapture: $showsCapture)
                 .tabItem { Label("Timeline", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90") }
                 .tag(Tab.timeline)
-
-            PlacesView()
-                .tabItem { Label("Places", systemImage: "map") }
-                .tag(Tab.places)
 
             MemoryView()
                 .tabItem { Label("Memory", systemImage: "sparkles") }
@@ -38,7 +39,7 @@ struct RootTabView: View {
         .environmentObject(contextController)
         .environmentObject(tier2Controller)
         .sheet(isPresented: $showsCapture) {
-            ContactMomentCaptureView()
+            ContactMomentCaptureView(prelinkedEventIDs: captureLinkedEventIDs)
                 .environmentObject(contextController)
             .environmentObject(tier2Controller)
         }
@@ -72,6 +73,12 @@ struct RootTabView: View {
             guard let latitude = note.userInfo?["latitude"] as? Double, let longitude = note.userInfo?["longitude"] as? Double else { return }
             pendingPlaceCoordinate = GeoCoordinate(latitude: latitude, longitude: longitude)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .tripStopContextRequested)) { note in
+            guard let eventID = note.userInfo?["eventID"] as? UUID else { return }
+            captureLinkedEventIDs = [eventID]
+            selectedTab = .timeline
+            showsCapture = true
+        }
         .preferredColorScheme(.light)
     }
 
@@ -92,5 +99,5 @@ struct RootTabView: View {
 }
 
 private enum Tab: Hashable {
-    case timeline, places, memory, settings
+    case timeline, memory, settings
 }

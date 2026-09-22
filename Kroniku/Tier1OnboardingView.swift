@@ -270,7 +270,7 @@ struct Tier1OnboardingView: View {
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Text("Optional: let Kroniku add drive, walk, and workout memories automatically, even when the app is closed, using location, motion, and workout signals in the background. Off by default and increases battery use when on.")
+                    Text("Optional: let Kroniku add drive, walk, and workout memories automatically, even when the app is closed, using location, motion, and workout signals in the background.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 

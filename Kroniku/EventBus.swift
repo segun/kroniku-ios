@@ -1,4 +1,22 @@
 import Foundation
+import OSLog
+
+enum SensorDiagnostics {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Kroniku",
+        category: "SensorDiagnostics"
+    )
+
+    static func log(_ message: String) {
+#if DEBUG
+        logger.notice("[SensorDiagnostics] \(message, privacy: .public)")
+#endif
+    }
+
+    static func timestamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+}
 
 /// Normalized signal type published by background-capable providers (location, motion, HealthKit).
 enum KronikuEventType: String, Codable {
@@ -32,6 +50,15 @@ actor KronikuEventBus {
     private var continuations: [UUID: AsyncStream<KronikuEvent>.Continuation] = [:]
 
     func publish(_ event: KronikuEvent) {
+        let metadata = event.metadata
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ")
+        SensorDiagnostics.log(
+            "BUS publish type=\(event.type.rawValue) source=\(event.source) " +
+            "timestamp=\(SensorDiagnostics.timestamp(event.timestamp)) metadata={\(metadata)} " +
+            "subscribers=\(continuations.count)"
+        )
         for continuation in continuations.values {
             continuation.yield(event)
         }

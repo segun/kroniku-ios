@@ -428,7 +428,7 @@ final class Tier1ContextController: ObservableObject {
                     )
                 }
             }
-            try repo.syncCalendarEvents(imported, for: startOfSelectedDay)
+            try repo.syncCalendarEvents(imported, for: startOfSelectedDay, attendeeLocationSharingEnabled: consent.calendarAttendeesAndLocationsEnabled)
         } catch {
             print("Calendar sync failed: \(error)")
         }
@@ -472,7 +472,7 @@ final class Tier1ContextController: ObservableObject {
     }
 
     private func geocodeLocationName(_ locationName: String) async -> GeoCoordinate? {
-        await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             CLGeocoder().geocodeAddressString(locationName) { placemarks, _ in
                 guard let coordinate = placemarks?.first?.location?.coordinate else {
                     continuation.resume(returning: nil)
@@ -698,10 +698,18 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last else {
+            SensorDiagnostics.log("LOCATION callback samples=0")
             continuation?.resume(returning: nil)
             continuation = nil
             return
         }
+
+        SensorDiagnostics.log(
+            "LOCATION callback samples=\(locations.count) timestamp=\(SensorDiagnostics.timestamp(location.timestamp)) " +
+            "latitude=\(location.coordinate.latitude) longitude=\(location.coordinate.longitude) " +
+            "horizontalAccuracy=\(location.horizontalAccuracy) speed=\(location.speed) " +
+            "oneShot=\(continuation != nil) backgroundMonitoring=\(isMonitoringBackground)"
+        )
 
         // A one-shot `captureVisit` request is in flight; resolve it and don't also publish a background event.
         guard continuation == nil else {
@@ -739,6 +747,7 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
                 }
 
                 await KronikuEventBus.shared.publish(KronikuEvent(
+                    timestamp: location.timestamp,
                     type: .locationSignificantChange,
                     source: "coreLocation",
                     metadata: [
@@ -849,10 +858,41 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
 
 @MainActor
 final class CoreMotionStateProvider: MotionContextProviding {
+    private struct ActivitySnapshot: Sendable {
+        let startDate: Date
+        let confidence: Int
+        let stationary: Bool
+        let walking: Bool
+        let running: Bool
+        let automotive: Bool
+        let cycling: Bool
+        let unknown: Bool
+
+        init(_ activity: CMMotionActivity) {
+            startDate = activity.startDate
+            confidence = activity.confidence.rawValue
+            stationary = activity.stationary
+            walking = activity.walking
+            running = activity.running
+            automotive = activity.automotive
+            cycling = activity.cycling
+            unknown = activity.unknown
+        }
+    }
+
     static let shared = CoreMotionStateProvider()
 
     private let manager = CMMotionActivityManager()
+    private let defaults: UserDefaults
+    private static let checkpointKey = "coreMotionLastProcessedAt"
+    private static let stateKey = "coreMotionLastPublishedState"
     private var lastPublishedState: MotionState?
+    private var catchUpTask: Task<Void, Never>?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.lastPublishedState = defaults.string(forKey: Self.stateKey).flatMap(MotionState.init(rawValue:))
+    }
 
     var authorizationState: PermissionState {
         switch CMMotionActivityManager.authorizationStatus() {
@@ -887,26 +927,108 @@ final class CoreMotionStateProvider: MotionContextProviding {
     /// Starts a continuous background feed; publishes `.motionChanged` only on high-confidence state transitions.
     func startContinuousUpdates() {
         guard CMMotionActivityManager.isActivityAvailable(), authorizationState == .authorized else { return }
+        catchUpTask?.cancel()
+        manager.stopActivityUpdates()
+        catchUpTask = Task { [weak self] in
+            await self?.catchUpAndStartLiveUpdates()
+        }
+    }
+
+    private func catchUpAndStartLiveUpdates() async {
+        let end = Date()
+        let startOfToday = Calendar.current.startOfDay(for: end)
+        let checkpoint = defaults.object(forKey: Self.checkpointKey) as? Date
+        let start = max(checkpoint ?? startOfToday, startOfToday)
+
+        do {
+            let activities = try await queryActivities(from: start, to: end)
+                .sorted { $0.startDate < $1.startDate }
+            SensorDiagnostics.log(
+                "MOTION catchUp start=\(SensorDiagnostics.timestamp(start)) " +
+                "end=\(SensorDiagnostics.timestamp(end)) samples=\(activities.count)"
+            )
+            for activity in activities where !Task.isCancelled {
+                await process(activity, origin: "history")
+            }
+        } catch {
+            SensorDiagnostics.log("MOTION catchUp failed error=\(error.localizedDescription)")
+        }
+
+        guard !Task.isCancelled else { return }
+        startLiveUpdates()
+    }
+
+    private func startLiveUpdates() {
         manager.startActivityUpdates(to: .main) { [weak self] activity in
-            guard let self, let activity, activity.confidence != .low, let state = self.mappedState(for: activity) else { return }
-            guard state != self.lastPublishedState else { return }
-            self.lastPublishedState = state
-            Task {
-                await KronikuEventBus.shared.publish(KronikuEvent(
-                    type: .motionChanged,
-                    source: "coreMotion",
-                    metadata: ["state": state.rawValue]
-                ))
+            guard let self, let activity else { return }
+            let snapshot = ActivitySnapshot(activity)
+            Task { @MainActor in
+                await self.process(snapshot, origin: "live")
             }
         }
     }
 
     func stopContinuousUpdates() {
+        catchUpTask?.cancel()
+        catchUpTask = nil
         manager.stopActivityUpdates()
-        lastPublishedState = nil
+    }
+
+    private func process(_ activity: ActivitySnapshot, origin: String) async {
+        let state = mappedState(for: activity)
+        let classification = state?.rawValue ?? "nil"
+        let attributes = [
+            "stationary=\(activity.stationary)",
+            "walking=\(activity.walking)",
+            "running=\(activity.running)",
+            "automotive=\(activity.automotive)",
+            "cycling=\(activity.cycling)",
+            "unknown=\(activity.unknown)"
+        ].joined(separator: " ")
+        SensorDiagnostics.log(
+            "MOTION callback origin=\(origin) start=\(SensorDiagnostics.timestamp(activity.startDate)) " +
+            "confidence=\(activity.confidence) \(attributes) mapped=\(classification)"
+        )
+        advanceCheckpoint(to: activity.startDate)
+        guard activity.confidence != CMMotionActivityConfidence.low.rawValue else {
+            SensorDiagnostics.log("MOTION ignored reason=lowConfidence")
+            return
+        }
+        guard let state else {
+            SensorDiagnostics.log("MOTION ignored reason=unmapped")
+            return
+        }
+        guard state != lastPublishedState else {
+            SensorDiagnostics.log("MOTION ignored reason=duplicate state=\(state.rawValue)")
+            return
+        }
+        lastPublishedState = state
+        defaults.set(state.rawValue, forKey: Self.stateKey)
+        await KronikuEventBus.shared.publish(KronikuEvent(
+            timestamp: activity.startDate,
+            type: .motionChanged,
+            source: "coreMotion",
+            metadata: ["state": state.rawValue, "origin": origin]
+        ))
+    }
+
+    private func advanceCheckpoint(to date: Date) {
+        let checkpoint = defaults.object(forKey: Self.checkpointKey) as? Date
+        if checkpoint == nil || date > checkpoint! {
+            defaults.set(date, forKey: Self.checkpointKey)
+        }
     }
 
     private func mappedState(for activity: CMMotionActivity) -> MotionState? {
+        if activity.automotive { return .driving }
+        if activity.cycling { return .cycling }
+        if activity.running { return .running }
+        if activity.walking { return .walking }
+        if activity.stationary { return .stationary }
+        return nil
+    }
+
+    private func mappedState(for activity: ActivitySnapshot) -> MotionState? {
         if activity.automotive { return .driving }
         if activity.cycling { return .cycling }
         if activity.running { return .running }
@@ -938,6 +1060,18 @@ final class CoreMotionStateProvider: MotionContextProviding {
                     } else {
                         continuation.resume(returning: nil)
                     }
+                }
+            }
+        }
+    }
+
+    private func queryActivities(from start: Date, to end: Date) async throws -> [ActivitySnapshot] {
+        try await withCheckedThrowingContinuation { continuation in
+            manager.queryActivityStarting(from: start, to: end, to: .main) { activities, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: (activities ?? []).map(ActivitySnapshot.init))
                 }
             }
         }
@@ -1003,7 +1137,15 @@ struct HealthKitSummaryProvider: HealthContextProviding {
 
     func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
 #if canImport(HealthKit)
-        guard authorizationState == .authorized else { return nil }
+        let requestedMetrics = metrics.map(\.rawValue).sorted().joined(separator: ",")
+        SensorDiagnostics.log(
+            "HEALTH summary request date=\(SensorDiagnostics.timestamp(date)) metrics=[\(requestedMetrics)] " +
+            "authorization=\(authorizationState.rawValue)"
+        )
+        guard authorizationState == .authorized else {
+            SensorDiagnostics.log("HEALTH summary ignored reason=unauthorized")
+            return nil
+        }
         var entries: [HealthSummary.Entry] = []
         let dayInterval = Calendar.current.dateInterval(of: .day, for: date) ?? DateInterval(start: date, end: date.addingTimeInterval(24 * 60 * 60))
 
@@ -1023,7 +1165,12 @@ struct HealthKitSummaryProvider: HealthContextProviding {
             entries.append(.init(metric: .sleep, value: String(format: "%.1f hr sleep", hours)))
         }
 
-        guard !entries.isEmpty else { return nil }
+        guard !entries.isEmpty else {
+            SensorDiagnostics.log("HEALTH summary result entries=[]")
+            return nil
+        }
+        let loggedEntries = entries.map { "\($0.metric.rawValue)=\($0.value)" }.joined(separator: ", ")
+        SensorDiagnostics.log("HEALTH summary result entries=[\(loggedEntries)]")
         return HealthSummary(capturedAt: date, entries: entries)
 #else
         _ = date
@@ -1161,9 +1308,17 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
     static let shared = HealthKitWorkoutObserver()
 
 #if canImport(HealthKit)
+    private struct WorkoutSnapshot: Sendable {
+        var id: UUID
+        var startDate: Date
+        var endDate: Date
+        var duration: TimeInterval
+        var activityName: String
+    }
+
     private let store = HKHealthStore()
     private var observerQuery: HKObserverQuery?
-    private var lastSeenWorkoutEndDate: Date?
+    private var publishedWorkoutIDs: Set<UUID> = []
 
     func requestAccess() async -> PermissionState {
         guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
@@ -1219,10 +1374,11 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
                 print("Workout observer query failed: \(error!)")
                 return
             }
-            Task { await self?.publishLatestWorkout() }
+            Task { await self?.publishRecentWorkouts() }
         }
         observerQuery = query
         store.execute(query)
+        Task { await publishRecentWorkouts() }
         store.enableBackgroundDelivery(for: workoutType, frequency: .immediate) { success, error in
             if let error {
                 print("Enabling workout background delivery failed: \(error)")
@@ -1240,29 +1396,55 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
         store.disableBackgroundDelivery(for: HKObjectType.workoutType(), withCompletion: { _, _ in })
     }
 
-    private func publishLatestWorkout() async {
-        guard let workout = await fetchMostRecentWorkout(), workout.endDate != lastSeenWorkoutEndDate else { return }
-        lastSeenWorkoutEndDate = workout.endDate
+    private func publishRecentWorkouts() async {
+        let workouts = await fetchRecentWorkouts()
+        guard !workouts.isEmpty else {
+            SensorDiagnostics.log("WORKOUT observer result=none")
+            return
+        }
 
         let formatter = ISO8601DateFormatter()
-        let minutes = Int((workout.duration / 60).rounded())
-        await KronikuEventBus.shared.publish(KronikuEvent(
-            timestamp: workout.endDate,
-            type: .workoutEnded,
-            source: "healthKit",
-            metadata: [
-                "startedAt": formatter.string(from: workout.startDate),
-                "activityType": workoutActivityName(for: workout),
-                "durationMinutes": "\(minutes)"
-            ]
-        ))
+        for workout in workouts.sorted(by: { $0.startDate < $1.startDate }) {
+            let isDuplicate = publishedWorkoutIDs.contains(workout.id)
+            SensorDiagnostics.log(
+                "WORKOUT callback start=\(SensorDiagnostics.timestamp(workout.startDate)) " +
+                "end=\(SensorDiagnostics.timestamp(workout.endDate)) durationSeconds=\(workout.duration) " +
+                "activity=\(workout.activityName) duplicate=\(isDuplicate)"
+            )
+            guard !isDuplicate else { continue }
+            publishedWorkoutIDs.insert(workout.id)
+            let minutes = Int((workout.duration / 60).rounded())
+            await KronikuEventBus.shared.publish(KronikuEvent(
+                timestamp: workout.endDate,
+                type: .workoutEnded,
+                source: "healthKit",
+                metadata: [
+                    "startedAt": formatter.string(from: workout.startDate),
+                    "endedAt": formatter.string(from: workout.endDate),
+                    "activityType": workout.activityName,
+                    "durationMinutes": "\(minutes)"
+                ]
+            ))
+        }
     }
 
-    private func fetchMostRecentWorkout() async -> HKWorkout? {
-        await withCheckedContinuation { continuation in
-            let sort = [NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)]
-            let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: nil, limit: 1, sortDescriptors: sort) { _, samples, _ in
-                continuation.resume(returning: samples?.first as? HKWorkout)
+    private func fetchRecentWorkouts() async -> [WorkoutSnapshot] {
+        let end = Date()
+        let start = end.addingTimeInterval(-2 * 24 * 60 * 60)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+        return await withCheckedContinuation { continuation in
+            let sort = [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
+            let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: sort) { _, samples, _ in
+                let snapshots = (samples as? [HKWorkout] ?? []).map { workout in
+                    WorkoutSnapshot(
+                        id: workout.uuid,
+                        startDate: workout.startDate,
+                        endDate: workout.endDate,
+                        duration: workout.duration,
+                        activityName: Self.workoutActivityName(for: workout)
+                    )
+                }
+                continuation.resume(returning: snapshots)
             }
             store.execute(query)
         }
@@ -1270,7 +1452,7 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
 
     /// Covers the common Health/Fitness activity types (indoor/outdoor and pool/open-water are
     /// distinguished via workout metadata, since HealthKit doesn't split them into separate types).
-    private func workoutActivityName(for workout: HKWorkout) -> String {
+    nonisolated private static func workoutActivityName(for workout: HKWorkout) -> String {
         let isIndoor = (workout.metadata?[HKMetadataKeyIndoorWorkout] as? Bool) ?? false
         switch workout.workoutActivityType {
         case .running: return isIndoor ? "Indoor Run" : "Outdoor Run"

@@ -31,6 +31,13 @@ struct SettingsView: View {
     @EnvironmentObject private var tier2Controller: Tier2ContextController
 
     @State private var selectedSection: SettingsSection = .general
+    @State private var retrievalOptIn = false
+    @State private var isUpdatingRetrievalOptIn = false
+    @State private var isExporting = false
+    @State private var exportedFileURL: IdentifiableURL?
+    @State private var accountActionError: String?
+    @State private var showsDeleteConfirmation = false
+    @State private var isDeletingAccount = false
 
     var body: some View {
         NavigationStack {
@@ -65,6 +72,24 @@ struct SettingsView: View {
             .onAppear {
                 contextController.refreshPermissions()
                 tier2Controller.refreshPermissions()
+                retrievalOptIn = (try? AuthService.shared.getRetrievalOptIn()) ?? false
+            }
+            .sheet(item: $exportedFileURL) { identifiable in
+                ShareSheet(activityItems: [identifiable.url])
+            }
+            .alert("Delete account", isPresented: $showsDeleteConfirmation) {
+                Button("Delete", role: .destructive) { deleteAccount() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This permanently deletes your account and all synced memories on the server. This cannot be undone.")
+            }
+            .alert("Something went wrong", isPresented: Binding(
+                get: { accountActionError != nil },
+                set: { if !$0 { accountActionError = nil } }
+            )) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(accountActionError ?? "")
             }
         }
     }
@@ -127,18 +152,35 @@ struct SettingsView: View {
         }
 
         VStack(alignment: .leading, spacing: 10) {
+            Text("Search")
+                .font(.headline.weight(.semibold))
+                .fontDesign(.rounded)
+            Toggle("Natural-language retrieval", isOn: Binding(
+                get: { retrievalOptIn },
+                set: { setRetrievalOptIn($0) }
+            ))
+            .disabled(isUpdatingRetrievalOptIn)
+            Text("Lets the Memory tab answer natural-language questions by retrieving your synced events. Keyword search always works without this.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .kronikuCard(.semantics)
+
+        VStack(alignment: .leading, spacing: 10) {
             Text("Your data")
                 .font(.headline.weight(.semibold))
                 .fontDesign(.rounded)
-            Text("Your memories stay on this device. Export or remove them whenever you need.")
+            Text("Your memories sync to your account. Export a copy or permanently delete your account and its data.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Export Data") { }
+                Button(isExporting ? "Exporting…" : "Export Data") { exportData() }
                     .buttonStyle(.borderedProminent)
                     .tint(KronikuPalette.ember)
-                Button("Delete all data") { }
+                    .disabled(isExporting)
+                Button(isDeletingAccount ? "Deleting…" : "Delete account") { showsDeleteConfirmation = true }
                     .foregroundStyle(.red)
+                    .disabled(isDeletingAccount)
             }
         }
         .kronikuCard(.semantics)
@@ -234,7 +276,7 @@ struct SettingsView: View {
                                 get: { contextController.consent.backgroundTripDetectionEnabled },
                                 set: { contextController.setBackgroundTripDetectionEnabled($0) }
                             ))
-                            Text("Uses location, motion, and workout signals in the background to add drive, walk, and workout memories automatically. Off by default; increases battery use when on.")
+                            Text("Uses location, motion, and workout signals in the background to add drive, walk, and workout memories automatically.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             if let issue = contextController.backgroundTripDetectionSetupIssue {
@@ -467,4 +509,79 @@ struct SettingsView: View {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         openURL(url)
     }
+
+    private func setRetrievalOptIn(_ enabled: Bool) {
+        let previousValue = retrievalOptIn
+        retrievalOptIn = enabled
+        isUpdatingRetrievalOptIn = true
+        Task {
+            do {
+                try await AccountService.shared.setRetrievalOptIn(enabled)
+            } catch {
+                await MainActor.run {
+                    retrievalOptIn = previousValue
+                    accountActionError = (error as? HTTPError)?.errorDescription ?? error.localizedDescription
+                }
+            }
+            await MainActor.run { isUpdatingRetrievalOptIn = false }
+        }
+    }
+
+    private func exportData() {
+        isExporting = true
+        Task {
+            do {
+                let export = try await AccountService.shared.exportAccountData()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(export)
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("kroniku-export-\(Int(Date().timeIntervalSince1970)).json")
+                try data.write(to: url)
+                await MainActor.run {
+                    exportedFileURL = IdentifiableURL(url: url)
+                    isExporting = false
+                }
+            } catch {
+                await MainActor.run {
+                    accountActionError = (error as? HTTPError)?.errorDescription ?? error.localizedDescription
+                    isExporting = false
+                }
+            }
+        }
+    }
+
+    private func deleteAccount() {
+        isDeletingAccount = true
+        Task {
+            do {
+                _ = try await AccountService.shared.deleteAccount()
+                try? AuthService.shared.logout()
+                await MainActor.run {
+                    isDeletingAccount = false
+                    isAuthenticated = false
+                }
+            } catch {
+                await MainActor.run {
+                    accountActionError = (error as? HTTPError)?.errorDescription ?? error.localizedDescription
+                    isDeletingAccount = false
+                }
+            }
+        }
+    }
+}
+
+struct IdentifiableURL: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
 }

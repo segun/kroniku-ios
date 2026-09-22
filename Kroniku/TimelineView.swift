@@ -589,7 +589,10 @@ private struct TimelineEventActionSheet: View {
             Button {
                 onEdit()
             } label: {
-                Label("Edit", systemImage: "pencil")
+                Label(
+                    event.source == "contactMoment" || event.contactMoment != nil ? "Edit" : "View details",
+                    systemImage: event.source == "contactMoment" || event.contactMoment != nil ? "pencil" : "info.circle"
+                )
                     .font(.body.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -622,7 +625,7 @@ private struct TimelineEventActionSheet: View {
     }
 }
 
-private struct TimelineRow: View {
+struct TimelineRow: View {
     let event: MemoryEvent
     let nextEvent: MemoryEvent?
     let schedule: DayPeriodSchedule
@@ -650,21 +653,23 @@ private struct TimelineRow: View {
         if event.source == "calendar", let title = cleaned(event.title) {
             return title
         }
-        if let contactMoment = event.contactMoment {
-            if let note = cleaned(contactMoment.note) {
-                return firstSentence(note)
+        if event.source == "contactMoment" || event.contactMoment != nil {
+            if let note = cleaned(event.contactMoment?.note) ?? cleaned(event.title) {
+                return headerSummary(note)
             }
-            let names = contactMoment.contactNames.isEmpty ? [contactMoment.personName].compactMap { $0 } : contactMoment.contactNames
+            let names = event.contactMoment?.contactNames.isEmpty == false
+                ? event.contactMoment?.contactNames ?? []
+                : [event.contactMoment?.personName, event.detail].compactMap { $0 }
             if !names.isEmpty {
                 return names.joined(separator: ", ")
             }
             return "Moment"
         }
-        if let detail = cleaned(event.detail) {
-            return firstSentence(detail)
-        }
         if let title = cleaned(event.title) {
-            return firstSentence(title)
+            return headerSummary(title)
+        }
+        if let detail = cleaned(event.detail) {
+            return headerSummary(detail)
         }
         return "Untitled memory"
     }
@@ -680,20 +685,27 @@ private struct TimelineRow: View {
     }
 
     private var timeOfDayFill: AnyShapeStyle {
-        guard let nextPeriod, nextPeriod != period else {
-            return AnyShapeStyle(periodPalette.background)
+        AnyShapeStyle(periodPalette.background)
+    }
+
+    // The blend into the next period lives in a bottom strip shorter than the card's
+    // bottom padding, so it never sits behind text or chips.
+    private var periodBlendStrip: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            if let nextPeriod, nextPeriod != period {
+                LinearGradient(
+                    colors: [
+                        periodPalette.background.opacity(0),
+                        nextPeriod.palette.background.opacity(0.9)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 10)
+            }
         }
-        return AnyShapeStyle(
-            LinearGradient(
-                colors: [
-                    periodPalette.background,
-                    periodPalette.background.opacity(0.72),
-                    nextPeriod.palette.background.opacity(0.38)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .allowsHitTesting(false)
     }
 
     private var timeOfDayBorder: Color {
@@ -702,8 +714,12 @@ private struct TimelineRow: View {
 
     private var shouldShowContextText: Bool {
         // For moments, `context` only carries backend search text (e.g. "Moment Eric BJ"); never render it.
-        guard event.source != "contactMoment" else { return false }
+        guard event.source != "contactMoment", event.source != "trip", event.source != "workout" else { return false }
         guard let context = event.context?.trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty else {
+            return false
+        }
+        if context.caseInsensitiveCompare(event.title ?? "") == .orderedSame ||
+            context.caseInsensitiveCompare(event.detail ?? "") == .orderedSame {
             return false
         }
         return true
@@ -750,6 +766,10 @@ private struct TimelineRow: View {
 
         if let attendees = metadataByKey["attendees"], !attendees.isEmpty {
             chips.append(.init(id: "attendees", text: readableAttendees ?? attendees, icon: "person.2"))
+        }
+
+        if event.contactMoment == nil, let people = metadataByKey["contacts"], !people.isEmpty {
+            chips.append(.init(id: "people", text: people.replacingOccurrences(of: ",", with: ", "), icon: "person.2"))
         }
 
         if let contactMoment = event.contactMoment {
@@ -865,10 +885,11 @@ private struct TimelineRow: View {
     }
 
     private var timeText: String {
-        if let date = event.occurredAt {
-            return date.formatted(.dateTime.hour(.twoDigits(amPM: .abbreviated)).minute())
-        }
-        return "--:--"
+        guard let start = event.occurredAt else { return "--:--" }
+        let startText = start.formatted(.dateTime.hour(.twoDigits(amPM: .abbreviated)).minute())
+        guard let end = event.derivedEndedAt, end > start else { return startText }
+        let endText = end.formatted(.dateTime.hour(.twoDigits(amPM: .abbreviated)).minute())
+        return "\(startText) - \(endText)"
     }
 
     private func cleaned(_ value: String?) -> String? {
@@ -877,10 +898,11 @@ private struct TimelineRow: View {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func firstSentence(_ value: String) -> String {
-        let sentence = value.split(whereSeparator: { $0 == "." || $0 == "!" || $0 == "?" }).first.map(String.init) ?? value
-        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.count > 96 ? String(trimmed.prefix(93)) + "..." : trimmed
+    // Shows the full note rather than stopping at the first sentence, since abbreviations like
+    // "Mr." or "Dr." would otherwise cut the header off mid-thought.
+    private func headerSummary(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count > 160 ? String(trimmed.prefix(157)) + "..." : trimmed
     }
 
     private func attendeeLabel(_ value: String) -> String {
@@ -917,17 +939,28 @@ private struct TimelineRow: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(displayTitle)
-                        .font(.body.weight(.semibold))
+                        .font(.callout.weight(.semibold))
                         .fontDesign(.rounded)
                         .foregroundStyle(periodPalette.text)
-                        .lineLimit(2)
+                        .lineLimit(3)
                         .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let detail = event.detail, !detail.isEmpty, event.source != "contactMoment" {
                         Text(detail)
                             .font(.subheadline)
                             .foregroundStyle(periodPalette.text.opacity(0.78))
                             .lineLimit(2)
                             .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if event.contactMoment == nil,
+                       let userNote = metadataByKey["userNote"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !userNote.isEmpty {
+                        Text(userNote)
+                            .font(.subheadline)
+                            .foregroundStyle(periodPalette.text.opacity(0.9))
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if shouldShowContextText, let context = event.context, !context.isEmpty {
                         Text(context)
@@ -963,7 +996,12 @@ private struct TimelineRow: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(timeOfDayFill))
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(timeOfDayFill)
+                .overlay(periodBlendStrip)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(timeOfDayBorder, lineWidth: 1.2)
