@@ -76,6 +76,27 @@ final class MockMemoryRepository: MemoryRepositoryProtocol {
         events.append(me)
     }
 
+    func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws {
+        var metadata: [ContextCard.MetadataEntry] = []
+        if let motion {
+            metadata.append(.init(key: "motion", value: motion.rawValue))
+        }
+        let event = MemoryEvent(
+            occurredAt: occurredAt,
+            source: source,
+            title: title,
+            detail: detail,
+            context: title,
+            contextCard: ContextCard(source: source, category: "derived", summary: detail ?? title, metadata: metadata)
+        )
+        event.confidenceScore = confidenceScore
+        event.derivedEndedAt = endedAt
+        if let place {
+            event.place = Place(name: place.name, latitude: place.coordinate.latitude, longitude: place.coordinate.longitude)
+        }
+        events.append(event)
+    }
+
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws {
         let calendar = Calendar.current
         let importedIDs = Set(imported.map(\.externalID))

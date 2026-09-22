@@ -225,6 +225,8 @@ struct Tier1ConsentState: Codable, Hashable {
     var noteIngestionEnabled: Bool = false
     var contactsResolutionEnabled: Bool = false
     var bluetoothContextEnabled: Bool = false
+    // Always-on background significant-location-change/motion/HealthKit-workout monitoring; off by default.
+    var backgroundTripDetectionEnabled: Bool = false
     var hasCompletedOnboarding: Bool = false
     var needsOnboardingResume: Bool = false
     var onboardingPage: Int = 0
@@ -281,6 +283,8 @@ final class MemoryEvent: Identifiable {
     var updatedAt: Date = Date()
     var linkedEventIDs: [UUID] = []
     var confidenceScore: Double?
+    // End of an occurredAt...endedAt range for system-derived events (e.g. trips/workouts) that have no ContactMoment.
+    var derivedEndedAt: Date?
     var backendEventId: String?
     var backendVersion: Int = 0
     var syncedToBackendAt: Date?
@@ -295,7 +299,7 @@ final class MemoryEvent: Identifiable {
     var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.occurredAt = occurredAt
@@ -313,6 +317,7 @@ final class MemoryEvent: Identifiable {
         self.photoAttachments = photoAttachments
         self.linkedEventIDs = linkedEventIDs
         self.confidenceScore = confidenceScore
+        self.derivedEndedAt = derivedEndedAt
         self.backendEventId = backendEventId
         self.backendVersion = backendVersion
         self.syncedToBackendAt = syncedToBackendAt

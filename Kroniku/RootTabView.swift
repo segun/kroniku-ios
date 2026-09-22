@@ -7,6 +7,7 @@ struct RootTabView: View {
     @State private var selectedTab: Tab = .timeline
     @State private var showsCapture = false
     @State private var showsTier1Onboarding = false
+    @State private var pendingPlaceCoordinate: GeoCoordinate?
     @StateObject private var contextController = Tier1ContextController()
     @StateObject private var tier2Controller = Tier2ContextController()
 
@@ -46,14 +47,19 @@ struct RootTabView: View {
                 .environmentObject(contextController)
                 .environmentObject(tier2Controller)
         }
+        .sheet(item: $pendingPlaceCoordinate) { coordinate in
+            NamePlaceView(coordinate: coordinate)
+        }
         .onAppear {
             guard AuthService.shared.isAuthenticated else { return }
             if !contextController.consent.hasCompletedOnboarding && !contextController.consent.needsOnboardingResume {
                 showsTier1Onboarding = true
             }
+            contextController.resumeBackgroundMonitoringIfNeeded()
             Task {
                 await contextController.pushDayPeriodsIfNeeded()
                 await contextController.pullDayPeriodsIfNeeded()
+                await NamedPlacesStore.shared.refresh()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in
@@ -61,6 +67,10 @@ struct RootTabView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .authSessionExpired)) { _ in
             handleExpiredSession()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .namePlaceRequested)) { note in
+            guard let latitude = note.userInfo?["latitude"] as? Double, let longitude = note.userInfo?["longitude"] as? Double else { return }
+            pendingPlaceCoordinate = GeoCoordinate(latitude: latitude, longitude: longitude)
         }
         .preferredColorScheme(.light)
     }

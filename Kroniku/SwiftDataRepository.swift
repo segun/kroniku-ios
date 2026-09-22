@@ -24,6 +24,7 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
     func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID], contactNames: [String], resolvedContactIdentifiers: [String], endedAt: Date?) throws
+    func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date) throws
     func applyRetentionPolicy(for consent: Tier1ConsentState) throws
     func delete(event: MemoryEvent) throws
@@ -127,6 +128,39 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         modelContext.insert(cm)
         modelContext.insert(me)
 
+        try modelContext.save()
+
+        NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
+    }
+
+    /// Creates a system-derived memory event (e.g. an inferred trip or workout) with no ContactMoment backing it.
+    func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws {
+        var metadata: [ContextCard.MetadataEntry] = []
+        if let motion {
+            metadata.append(.init(key: "motion", value: motion.rawValue))
+        }
+        if let endedAt {
+            metadata.append(.init(key: "endedAt", value: ISO8601DateFormatter().string(from: endedAt)))
+        }
+
+        let event = MemoryEvent(
+            occurredAt: occurredAt,
+            source: source,
+            title: title,
+            detail: detail,
+            context: title,
+            contextCard: ContextCard(source: source, category: "derived", summary: detail ?? title, metadata: metadata),
+            symbolName: source == "workout" ? "figure.run" : "car.fill",
+            colorName: source == "workout" ? "green" : "teal",
+            confidenceScore: confidenceScore,
+            derivedEndedAt: endedAt
+        )
+
+        if let place {
+            event.place = Place(name: place.name, latitude: place.coordinate.latitude, longitude: place.coordinate.longitude)
+        }
+
+        modelContext.insert(event)
         try modelContext.save()
 
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
@@ -416,6 +450,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
         if let endedAt = contextData.endedAt {
             card.metadata.append(.init(key: "endedAt", value: ISO8601DateFormatter().string(from: endedAt)))
+            if event.contactMoment == nil {
+                event.derivedEndedAt = endedAt
+            }
         }
         event.contextCard = card
         event.photoAttachments = (contextData.photoReferences ?? []).map {
@@ -617,7 +654,7 @@ private extension MemoryEvent {
             timeSemantics: timeSemantics,
             photoReferences: photoReferences,
             contacts: contactMoment?.contactNames.isEmpty == false ? contactMoment?.contactNames : nil,
-            endedAt: contactMoment?.endedAt
+            endedAt: contactMoment?.endedAt ?? derivedEndedAt
         )
     }
 

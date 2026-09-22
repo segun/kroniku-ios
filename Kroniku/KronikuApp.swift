@@ -1,8 +1,21 @@
 import SwiftUI
 import SwiftData
 
+/// The single SwiftData container for the app; shared with `KronikuAppDelegate` so background
+/// event handling never opens a second, independent container against the same store.
+enum KronikuModelContainer {
+    static let shared: ModelContainer = {
+        do {
+            return try ModelContainer(for: MemoryEvent.self, ContactMoment.self, Place.self, WeatherSnapshot.self)
+        } catch {
+            fatalError("Failed to create Kroniku's ModelContainer: \(error)")
+        }
+    }()
+}
+
 @main
 struct KronikuApp: App {
+    @UIApplicationDelegateAdaptor(KronikuAppDelegate.self) private var appDelegate
     @State private var isAuthenticated = false
     @State private var hasCompletedWelcome = UserDefaults.standard.bool(forKey: Self.hasCompletedWelcomeKey)
     private let authService = AuthService.shared
@@ -27,7 +40,7 @@ struct KronikuApp: App {
                 checkAuthStatus()
             }
         }
-        .modelContainer(for: [MemoryEvent.self, ContactMoment.self, Place.self, WeatherSnapshot.self])
+        .modelContainer(KronikuModelContainer.shared)
     }
 
     private func checkAuthStatus() {

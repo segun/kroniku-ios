@@ -10,7 +10,7 @@ struct Tier1OnboardingView: View {
 
     @State private var currentPage = 0
 
-    private let lastPage = 2
+    private let lastPage = 3
 
     var body: some View {
         NavigationStack {
@@ -38,8 +38,10 @@ struct Tier1OnboardingView: View {
                             onboardingPageOne
                         case 1:
                             onboardingPageTwo
-                        default:
+                        case 2:
                             onboardingPageThree
+                        default:
+                            onboardingPageFour
                         }
                     }
                     .animation(.easeInOut, value: currentPage)
@@ -256,6 +258,34 @@ struct Tier1OnboardingView: View {
                     )
                 }
                 .kronikuCard(.context)
+            }
+        }
+    }
+
+    private var onboardingPageFour: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Background trip detection")
+                        .font(.headline.weight(.semibold))
+                        .fontDesign(.rounded)
+
+                    Text("Optional: let Kroniku add drive, walk, and workout memories automatically, even when the app is closed, using location, motion, and workout signals in the background. Off by default and increases battery use when on.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("Background trip detection", isOn: Binding(
+                        get: { contextController.consent.backgroundTripDetectionEnabled },
+                        set: { contextController.setBackgroundTripDetectionEnabled($0) }
+                    ))
+
+                    if let issue = contextController.backgroundTripDetectionSetupIssue {
+                        Text(issue)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.red)
+                    }
+                }
+                .kronikuCard(.semantics)
             }
         }
     }

@@ -23,6 +23,17 @@ protocol LocationContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess() async -> PermissionState
     func captureVisit(around date: Date) async -> VisitSnapshot?
+    /// Escalates to "always" authorization; required before background monitoring can start.
+    func requestAlwaysAccess() async -> PermissionState
+    /// Starts significant-location-change monitoring, publishing events to `KronikuEventBus`.
+    func startBackgroundMonitoring()
+    func stopBackgroundMonitoring()
+}
+
+extension LocationContextProviding {
+    func requestAlwaysAccess() async -> PermissionState { authorizationState }
+    func startBackgroundMonitoring() {}
+    func stopBackgroundMonitoring() {}
 }
 
 @MainActor
@@ -35,6 +46,14 @@ protocol MotionContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess() async -> PermissionState
     func motionState(at date: Date) async -> MotionState?
+    /// Starts continuous background activity updates, publishing `.motionChanged` events to `KronikuEventBus`.
+    func startContinuousUpdates()
+    func stopContinuousUpdates()
+}
+
+extension MotionContextProviding {
+    func startContinuousUpdates() {}
+    func stopContinuousUpdates() {}
 }
 
 @MainActor
@@ -42,6 +61,14 @@ protocol HealthContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess(for metrics: Set<Tier1HealthMetric>) async -> PermissionState
     func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary?
+}
+
+/// Background HealthKit workout observation, independent of the Tier1 metric summaries above.
+@MainActor
+protocol WorkoutContextProviding {
+    func requestAccess() async -> PermissionState
+    func startBackgroundDelivery()
+    func stopBackgroundDelivery()
 }
 
 @MainActor
@@ -90,6 +117,7 @@ final class Tier1ContextController: ObservableObject {
     @Published private(set) var locationPermission: PermissionState
     @Published private(set) var motionPermission: PermissionState
     @Published private(set) var healthPermission: PermissionState
+    @Published private(set) var backgroundTripDetectionSetupIssue: String?
 
     let consentStore: Tier1ConsentStore
     private let calendarProvider: CalendarContextProviding
@@ -97,6 +125,7 @@ final class Tier1ContextController: ObservableObject {
     private let weatherProvider: WeatherContextProviding
     private let motionProvider: MotionContextProviding
     private let healthProvider: HealthContextProviding
+    private let workoutProvider: WorkoutContextProviding
     private let timeLabelProvider: TimeSemanticLabelProviding
     private var cachedCalendarEventsByDay: [Date: CachedCalendarDay] = [:]
     private var recentVisitSnapshot: VisitSnapshot?
@@ -105,10 +134,11 @@ final class Tier1ContextController: ObservableObject {
     init(
         consentStore: Tier1ConsentStore = Tier1ConsentStore(),
         calendarProvider: CalendarContextProviding = EventKitCalendarProvider(),
-        locationProvider: LocationContextProviding = CoreLocationVisitProvider(),
+        locationProvider: LocationContextProviding = CoreLocationVisitProvider.shared,
         weatherProvider: WeatherContextProviding = WeatherKitSnapshotProvider(),
-        motionProvider: MotionContextProviding = CoreMotionStateProvider(),
+        motionProvider: MotionContextProviding = CoreMotionStateProvider.shared,
         healthProvider: HealthContextProviding = HealthKitSummaryProvider(),
+        workoutProvider: WorkoutContextProviding = HealthKitWorkoutObserver.shared,
         timeLabelProvider: TimeSemanticLabelProviding = DefaultTimeSemanticLabelProvider()
     ) {
         self.consentStore = consentStore
@@ -117,6 +147,7 @@ final class Tier1ContextController: ObservableObject {
         self.weatherProvider = weatherProvider
         self.motionProvider = motionProvider
         self.healthProvider = healthProvider
+        self.workoutProvider = workoutProvider
         self.timeLabelProvider = timeLabelProvider
         // Defer permission introspection until a privacy UI/action path requests it.
         self.calendarPermission = .notDetermined
@@ -187,6 +218,50 @@ final class Tier1ContextController: ObservableObject {
                 $0.photoAttachmentEnabled = status == .authorized || status == .limited
             }
         }
+    }
+
+    /// Requests always-location + workout access and starts/stops the background event bus monitors accordingly.
+    func setBackgroundTripDetectionEnabled(_ enabled: Bool) {
+        guard enabled else {
+            consentStore.update { $0.backgroundTripDetectionEnabled = false }
+            backgroundTripDetectionSetupIssue = nil
+            locationProvider.stopBackgroundMonitoring()
+            motionProvider.stopContinuousUpdates()
+            workoutProvider.stopBackgroundDelivery()
+            return
+        }
+
+        Task {
+            let alwaysLocation = await locationProvider.requestAlwaysAccess()
+            let motion = await motionProvider.requestAccess()
+            let workout = await workoutProvider.requestAccess()
+            let granted = alwaysLocation == .authorized && motion == .authorized && workout == .authorized
+            consentStore.update { $0.backgroundTripDetectionEnabled = granted }
+            guard granted else {
+                backgroundTripDetectionSetupIssue = missingPermissionMessage(location: alwaysLocation, motion: motion, workout: workout)
+                return
+            }
+            backgroundTripDetectionSetupIssue = nil
+            locationProvider.startBackgroundMonitoring()
+            motionProvider.startContinuousUpdates()
+            workoutProvider.startBackgroundDelivery()
+        }
+    }
+
+    private func missingPermissionMessage(location: PermissionState, motion: PermissionState, workout: PermissionState) -> String {
+        var missing: [String] = []
+        if location != .authorized { missing.append("Location set to Always") }
+        if motion != .authorized { missing.append("Motion & Fitness") }
+        if workout != .authorized { missing.append("Health (workouts)") }
+        return "Turn on \(missing.joined(separator: ", ")) in Settings > Kroniku, then try again."
+    }
+
+    /// Re-attaches the background monitors after a process relaunch; a no-op if the toggle is off.
+    func resumeBackgroundMonitoringIfNeeded() {
+        guard consent.backgroundTripDetectionEnabled else { return }
+        locationProvider.startBackgroundMonitoring()
+        motionProvider.startContinuousUpdates()
+        workoutProvider.startBackgroundDelivery()
     }
 
     func setTimeSemanticsEnabled(_ enabled: Bool) {
@@ -531,8 +606,12 @@ final class EventKitCalendarProvider: CalendarContextProviding {
 
 @MainActor
 final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @preconcurrency CLLocationManagerDelegate {
+    /// Shared instance so a background relaunch keeps delivering to the same `CLLocationManager` delegate.
+    static let shared = CoreLocationVisitProvider()
+
     private let manager = CLLocationManager()
     private var continuation: CheckedContinuation<VisitSnapshot?, Never>?
+    private var isMonitoringBackground = false
 
     override init() {
         super.init()
@@ -550,12 +629,51 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
         }
     }
 
+    var isAuthorizedAlways: Bool {
+        manager.authorizationStatus == .authorizedAlways
+    }
+
     func requestAccess() async -> PermissionState {
         if manager.authorizationStatus == .notDetermined {
             manager.requestWhenInUseAuthorization()
-            _ = await waitForAuthorizationChange(timeoutSeconds: 8)
+            _ = await waitForAuthorizationChange(from: .notDetermined, timeoutSeconds: 8)
         }
         return authorizationState
+    }
+
+    /// Escalates to always authorization, required for significant-location-change wake-ups while backgrounded.
+    /// Handles both a fresh (notDetermined) request and an upgrade from an existing when-in-use grant.
+    /// Returns `.authorized` only for a true "Always" grant, since when-in-use alone can't back background monitoring.
+    func requestAlwaysAccess() async -> PermissionState {
+        if manager.authorizationStatus != .authorizedAlways {
+            let statusBeforeFirstRequest = manager.authorizationStatus
+            manager.requestAlwaysAuthorization()
+            _ = await waitForAuthorizationChange(from: statusBeforeFirstRequest, timeoutSeconds: 8)
+
+            if manager.authorizationStatus == .authorizedWhenInUse {
+                // iOS asked for when-in-use first; follow up so the user sees the Always upgrade prompt too.
+                let statusBeforeUpgrade = manager.authorizationStatus
+                manager.requestAlwaysAuthorization()
+                _ = await waitForAuthorizationChange(from: statusBeforeUpgrade, timeoutSeconds: 8)
+            }
+        }
+        return manager.authorizationStatus == .authorizedAlways ? .authorized : .denied
+    }
+
+    /// Starts significant-location-change monitoring, which can relaunch the app in the background.
+    /// Publishes `.locationSignificantChange` events to `KronikuEventBus` instead of resolving `captureVisit`.
+    func startBackgroundMonitoring() {
+        guard isAuthorizedAlways else { return }
+        manager.allowsBackgroundLocationUpdates = true
+        manager.pausesLocationUpdatesAutomatically = false
+        manager.startMonitoringSignificantLocationChanges()
+        isMonitoringBackground = true
+    }
+
+    func stopBackgroundMonitoring() {
+        manager.stopMonitoringSignificantLocationChanges()
+        manager.allowsBackgroundLocationUpdates = false
+        isMonitoringBackground = false
     }
 
     func captureVisit(around date: Date) async -> VisitSnapshot? {
@@ -585,16 +703,50 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
             return
         }
 
+        // A one-shot `captureVisit` request is in flight; resolve it and don't also publish a background event.
+        guard continuation == nil else {
+            let geocoder = CLGeocoder()
+            geocoder.reverseGeocodeLocation(location) { placemarks, _ in
+                Task { @MainActor in
+                    let placeName = placemarks?.first?.name ?? "Nearby"
+                    self.continuation?.resume(returning: VisitSnapshot(
+                        name: placeName,
+                        coordinate: GeoCoordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
+                        capturedAt: Date()
+                    ))
+                    self.continuation = nil
+                }
+            }
+            return
+        }
+
+        guard isMonitoringBackground else { return }
         let geocoder = CLGeocoder()
         geocoder.reverseGeocodeLocation(location) { placemarks, _ in
+            let resolvedName = placemarks?.first?.name
+            let latitude = location.coordinate.latitude
+            let longitude = location.coordinate.longitude
             Task { @MainActor in
-                let placeName = placemarks?.first?.name ?? "Nearby"
-                self.continuation?.resume(returning: VisitSnapshot(
-                    name: placeName,
-                    coordinate: GeoCoordinate(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude),
-                    capturedAt: Date()
+                let placeName: String
+                if let resolvedName {
+                    placeName = resolvedName
+                } else if let named = NamedPlacesStore.shared.matchingPlace(latitude: latitude, longitude: longitude) {
+                    // Reverse geocoding failed, but the user already named this spot — reuse it.
+                    placeName = named.name
+                } else {
+                    placeName = "Nearby"
+                    NamedPlacesStore.shared.promptToNameIfNeeded(latitude: latitude, longitude: longitude)
+                }
+
+                await KronikuEventBus.shared.publish(KronikuEvent(
+                    type: .locationSignificantChange,
+                    source: "coreLocation",
+                    metadata: [
+                        "placeName": placeName,
+                        "latitude": "\(latitude)",
+                        "longitude": "\(longitude)"
+                    ]
                 ))
-                self.continuation = nil
             }
         }
     }
@@ -605,10 +757,10 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
         continuation = nil
     }
 
-    private func waitForAuthorizationChange(timeoutSeconds: TimeInterval) async -> Bool {
+    private func waitForAuthorizationChange(from initialStatus: CLAuthorizationStatus, timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
-            if manager.authorizationStatus != .notDetermined {
+            if manager.authorizationStatus != initialStatus {
                 return true
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -697,7 +849,10 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
 
 @MainActor
 final class CoreMotionStateProvider: MotionContextProviding {
+    static let shared = CoreMotionStateProvider()
+
     private let manager = CMMotionActivityManager()
+    private var lastPublishedState: MotionState?
 
     var authorizationState: PermissionState {
         switch CMMotionActivityManager.authorizationStatus() {
@@ -727,6 +882,37 @@ final class CoreMotionStateProvider: MotionContextProviding {
             print("Motion activity query failed: \(error)")
             return nil
         }
+    }
+
+    /// Starts a continuous background feed; publishes `.motionChanged` only on high-confidence state transitions.
+    func startContinuousUpdates() {
+        guard CMMotionActivityManager.isActivityAvailable(), authorizationState == .authorized else { return }
+        manager.startActivityUpdates(to: .main) { [weak self] activity in
+            guard let self, let activity, activity.confidence != .low, let state = self.mappedState(for: activity) else { return }
+            guard state != self.lastPublishedState else { return }
+            self.lastPublishedState = state
+            Task {
+                await KronikuEventBus.shared.publish(KronikuEvent(
+                    type: .motionChanged,
+                    source: "coreMotion",
+                    metadata: ["state": state.rawValue]
+                ))
+            }
+        }
+    }
+
+    func stopContinuousUpdates() {
+        manager.stopActivityUpdates()
+        lastPublishedState = nil
+    }
+
+    private func mappedState(for activity: CMMotionActivity) -> MotionState? {
+        if activity.automotive { return .driving }
+        if activity.cycling { return .cycling }
+        if activity.running { return .running }
+        if activity.walking { return .walking }
+        if activity.stationary { return .stationary }
+        return nil
     }
 
     private func queryMotionState(from start: Date, to end: Date) async throws -> MotionState? {
@@ -966,6 +1152,186 @@ struct HealthKitSummaryProvider: HealthContextProviding {
             return .restricted
         }
     }
+#endif
+}
+
+/// Observes HealthKit workouts in the background and publishes `.workoutStarted`/`.workoutEnded` to `KronikuEventBus`.
+@MainActor
+final class HealthKitWorkoutObserver: WorkoutContextProviding {
+    static let shared = HealthKitWorkoutObserver()
+
+#if canImport(HealthKit)
+    private let store = HKHealthStore()
+    private var observerQuery: HKObserverQuery?
+    private var lastSeenWorkoutEndDate: Date?
+
+    func requestAccess() async -> PermissionState {
+        guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
+        do {
+            try await store.requestAuthorization(toShare: [], read: [HKObjectType.workoutType()])
+        } catch {
+            print("Workout permission request failed: \(error)")
+            return .denied
+        }
+        // Read-only authorizationStatus(for:) always reflects share (write) status, which we never requested,
+        // so it can't tell us whether read access was granted — probe with an actual sample query instead.
+        return await probeWorkoutReadAuthorization()
+    }
+
+    private func probeWorkoutReadAuthorization() async -> PermissionState {
+        let end = Date()
+        let start = end.addingTimeInterval(-24 * 60 * 60)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HKSample], Error>) in
+                let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate, limit: 1, sortDescriptors: nil) { _, samples, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: samples ?? [])
+                    }
+                }
+                store.execute(query)
+            }
+            return .authorized
+        } catch {
+            if let hkError = error as? HKError {
+                switch hkError.code {
+                case .errorAuthorizationDenied:
+                    return .denied
+                case .errorAuthorizationNotDetermined:
+                    return .notDetermined
+                default:
+                    return .restricted
+                }
+            }
+            return .restricted
+        }
+    }
+
+    func startBackgroundDelivery() {
+        guard HKHealthStore.isHealthDataAvailable(), observerQuery == nil else { return }
+        let workoutType = HKObjectType.workoutType()
+        let query = HKObserverQuery(sampleType: workoutType, predicate: nil) { [weak self] _, completionHandler, error in
+            defer { completionHandler() }
+            guard error == nil else {
+                print("Workout observer query failed: \(error!)")
+                return
+            }
+            Task { await self?.publishLatestWorkout() }
+        }
+        observerQuery = query
+        store.execute(query)
+        store.enableBackgroundDelivery(for: workoutType, frequency: .immediate) { success, error in
+            if let error {
+                print("Enabling workout background delivery failed: \(error)")
+            } else if !success {
+                print("Workout background delivery could not be enabled.")
+            }
+        }
+    }
+
+    func stopBackgroundDelivery() {
+        if let observerQuery {
+            store.stop(observerQuery)
+        }
+        observerQuery = nil
+        store.disableBackgroundDelivery(for: HKObjectType.workoutType(), withCompletion: { _, _ in })
+    }
+
+    private func publishLatestWorkout() async {
+        guard let workout = await fetchMostRecentWorkout(), workout.endDate != lastSeenWorkoutEndDate else { return }
+        lastSeenWorkoutEndDate = workout.endDate
+
+        let formatter = ISO8601DateFormatter()
+        let minutes = Int((workout.duration / 60).rounded())
+        await KronikuEventBus.shared.publish(KronikuEvent(
+            timestamp: workout.endDate,
+            type: .workoutEnded,
+            source: "healthKit",
+            metadata: [
+                "startedAt": formatter.string(from: workout.startDate),
+                "activityType": workoutActivityName(for: workout),
+                "durationMinutes": "\(minutes)"
+            ]
+        ))
+    }
+
+    private func fetchMostRecentWorkout() async -> HKWorkout? {
+        await withCheckedContinuation { continuation in
+            let sort = [NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)]
+            let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: nil, limit: 1, sortDescriptors: sort) { _, samples, _ in
+                continuation.resume(returning: samples?.first as? HKWorkout)
+            }
+            store.execute(query)
+        }
+    }
+
+    /// Covers the common Health/Fitness activity types (indoor/outdoor and pool/open-water are
+    /// distinguished via workout metadata, since HealthKit doesn't split them into separate types).
+    private func workoutActivityName(for workout: HKWorkout) -> String {
+        let isIndoor = (workout.metadata?[HKMetadataKeyIndoorWorkout] as? Bool) ?? false
+        switch workout.workoutActivityType {
+        case .running: return isIndoor ? "Indoor Run" : "Outdoor Run"
+        case .walking: return isIndoor ? "Indoor Walk" : "Outdoor Walk"
+        case .cycling: return isIndoor ? "Indoor Cycle" : "Outdoor Cycle"
+        case .hiking: return "Hiking"
+        case .swimming:
+            if let locationRaw = workout.metadata?[HKMetadataKeySwimmingLocationType] as? Int,
+               let location = HKWorkoutSwimmingLocationType(rawValue: locationRaw), location == .openWater {
+                return "Open Water Swim"
+            }
+            return "Pool Swim"
+        case .highIntensityIntervalTraining: return "High Intensity Interval Training"
+        case .traditionalStrengthTraining: return "Traditional Strength Training"
+        case .functionalStrengthTraining: return "Functional Strength Training"
+        case .coreTraining: return "Core Training"
+        case .elliptical: return "Elliptical"
+        case .rowing: return isIndoor ? "Indoor Row" : "Rowing"
+        case .stairClimbing: return "Stair Climbing"
+        case .crossTraining: return "Cross Training"
+        case .mixedCardio: return "Mixed Cardio"
+        case .yoga: return "Yoga"
+        case .pilates: return "Pilates"
+        case .dance: return "Dance"
+        case .cooldown: return "Cooldown"
+        case .flexibility: return "Flexibility"
+        case .stepTraining: return "Step Training"
+        case .boxing, .kickboxing: return "Boxing"
+        case .martialArts: return "Martial Arts"
+        case .climbing: return "Climbing"
+        case .golf: return "Golf"
+        case .basketball: return "Basketball"
+        case .soccer: return "Soccer"
+        case .tennis: return "Tennis"
+        case .badminton: return "Badminton"
+        case .squash: return "Squash"
+        case .volleyball: return "Volleyball"
+        case .americanFootball: return "Football"
+        case .baseball: return "Baseball"
+        case .softball: return "Softball"
+        case .cricket: return "Cricket"
+        case .hockey: return "Hockey"
+        case .rugby: return "Rugby"
+        case .handball: return "Handball"
+        case .tableTennis: return "Table Tennis"
+        case .sailing: return "Sailing"
+        case .surfingSports: return "Surfing"
+        case .waterFitness: return "Water Fitness"
+        case .waterPolo: return "Water Polo"
+        case .paddleSports: return "Paddle Sports"
+        case .fencing: return "Fencing"
+        case .wrestling: return "Wrestling"
+        case .taiChi: return "Tai Chi"
+        case .mindAndBody: return "Mind and Body"
+        default: return "Workout"
+        }
+    }
+#else
+    func requestAccess() async -> PermissionState { .restricted }
+    func startBackgroundDelivery() {}
+    func stopBackgroundDelivery() {}
 #endif
 }
 

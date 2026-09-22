@@ -228,6 +228,21 @@ struct SettingsView: View {
                                 set: { contextController.setMotionAttachmentEnabled($0) }
                             ))
 
+                            Divider()
+
+                            Toggle("Background trip detection", isOn: Binding(
+                                get: { contextController.consent.backgroundTripDetectionEnabled },
+                                set: { contextController.setBackgroundTripDetectionEnabled($0) }
+                            ))
+                            Text("Uses location, motion, and workout signals in the background to add drive, walk, and workout memories automatically. Off by default; increases battery use when on.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let issue = contextController.backgroundTripDetectionSetupIssue {
+                                Text(issue)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.red)
+                            }
+
                             Toggle("Attach photos", isOn: consentBinding(
                                 get: { contextController.consent.photoAttachmentEnabled },
                                 set: { contextController.setPhotoAttachmentEnabled($0) }
