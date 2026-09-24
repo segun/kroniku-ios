@@ -75,6 +75,7 @@ struct TimelineView: View {
         case motion
         case health
         case photos
+        case sleep
 
         var id: String { rawValue }
 
@@ -87,6 +88,7 @@ struct TimelineView: View {
             case .motion: return "Motion"
             case .health: return "Health"
             case .photos: return "Photos"
+            case .sleep: return "Sleep"
             }
         }
 
@@ -99,6 +101,7 @@ struct TimelineView: View {
             case .motion: return "figure.walk"
             case .health: return "heart.text.square"
             case .photos: return "photo"
+            case .sleep: return "bed.double.fill"
             }
         }
     }
@@ -502,6 +505,8 @@ struct TimelineView: View {
             return event.healthSummary?.entries.isEmpty == false
         case .photos:
             return !event.photoAttachments.isEmpty
+        case .sleep:
+            return event.source == "sleep"
         }
     }
 
@@ -752,6 +757,28 @@ struct TimelineRow: View {
             chips.append(.init(id: "weather", text: weatherText, icon: weatherIcon(for: weatherText)))
         }
 
+        if let heartRate = event.healthSummary?.entries.first(where: { $0.metric == .heartRate }) {
+            chips.append(.init(id: "health-heartRate", text: heartRate.value, icon: "heart.fill"))
+        }
+
+        if let respiratoryRate = event.healthSummary?.entries.first(where: { $0.metric == .respiratoryRate }) {
+            chips.append(.init(id: "health-respiratoryRate", text: respiratoryRate.value, icon: "lungs.fill"))
+        }
+
+        if let hrv = event.healthSummary?.entries.first(where: { $0.metric == .heartRateVariability }) {
+            chips.append(.init(id: "health-hrv", text: hrv.value, icon: "waveform.path.ecg"))
+        }
+
+        if let distanceMeters = event.distanceMeters {
+            let icon = event.source == "workout" ? "figure.run.circle" : "road.lanes"
+            chips.append(.init(id: "distance", text: String(format: "%.1f km", distanceMeters / 1000), icon: icon))
+        }
+
+        if event.workoutRoute?.coordinates.isEmpty == false {
+            chips.append(.init(id: "route", text: event.source == "workout" ? "Route recorded" : "Route (approx)", icon: "map"))
+        }
+
+
         if let motion = metadataByKey["motion"], !motion.isEmpty {
             chips.append(.init(id: "motion", text: motion.capitalized, icon: motionIcon(for: motion)))
         }
@@ -781,7 +808,7 @@ struct TimelineRow: View {
         }
 
         if let healthSummary = event.healthSummary, !healthSummary.entries.isEmpty {
-            for entry in healthSummary.entries {
+            for entry in healthSummary.entries where entry.metric != .heartRate {
                 chips.append(.init(id: "health-\(entry.metric.rawValue)", text: entry.value, icon: "heart.text.square"))
             }
         }
@@ -838,6 +865,7 @@ struct TimelineRow: View {
         case "driving": return "car"
         case "cycling": return "bicycle"
         case "stationary": return "figure.stand"
+        case "unknown": return "questionmark.circle"
         default: return "figure.walk"
         }
     }
@@ -880,8 +908,37 @@ struct TimelineRow: View {
         case "orange": return .orange
         case "pink": return .pink
         case "red": return .red
+        case "purple": return .purple
         default: return .gray
         }
+    }
+
+    /// Recovers a reasonable icon for events synced in from another device/reinstall, where `symbolName`
+    /// isn't part of the sync payload and so arrives `nil`.
+    private static func fallbackSymbolName(for source: String?) -> String {
+        switch source {
+        case "workout": return "figure.run"
+        case "geofence": return "mappin.circle"
+        case "sleep": return "bed.double.fill"
+        case "calendar": return "calendar"
+        case "contactMoment": return "sparkles"
+        case "trip": return "car.fill"
+        default: return "circle.fill"
+        }
+    }
+
+    /// Went to bed (calm/indigo moon) vs. woke up (bright/energetic sun), regardless of the stored symbolName,
+    /// so older "bed.double.fill"-for-both rows also render distinctly.
+    private var iconSymbolName: String {
+        guard event.source == "sleep" else {
+            return event.symbolName ?? Self.fallbackSymbolName(for: event.source)
+        }
+        return event.title == "Woke up" ? "sun.max.fill" : "moon.stars.fill"
+    }
+
+    private var iconTintColor: Color {
+        guard event.source == "sleep" else { return periodPalette.accent }
+        return event.title == "Woke up" ? .orange : .indigo
     }
 
     private var timeText: String {
@@ -931,11 +988,11 @@ struct TimelineRow: View {
             }
 
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: event.symbolName ?? "circle.fill")
+                Image(systemName: iconSymbolName)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(periodPalette.accent)
+                    .foregroundStyle(iconTintColor)
                     .frame(width: 34, height: 34)
-                    .background(periodPalette.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .background(iconTintColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(displayTitle)

@@ -5,6 +5,7 @@ struct Tier1OnboardingView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var contextController: Tier1ContextController
     @EnvironmentObject private var tier2Controller: Tier2ContextController
 
@@ -69,9 +70,12 @@ struct Tier1OnboardingView: View {
             }
         }
         .onAppear {
-            contextController.refreshPermissions()
-            tier2Controller.refreshPermissions()
+            refreshPermissionSnapshots()
             currentPage = min(contextController.consent.onboardingPage, lastPage)
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            refreshPermissionSnapshots()
         }
         .onChange(of: currentPage) { _, newValue in
             contextController.updateOnboardingPage(newValue)
@@ -146,7 +150,7 @@ struct Tier1OnboardingView: View {
                         .font(.headline.weight(.semibold))
                         .fontDesign(.rounded)
 
-                    Text("Allow this when you want eligible memories to include activity, sleep, or mindfulness summaries.")
+                    Text("Choose the health metrics you want Kroniku to add to eligible memories, such as heart rate during a workout.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
@@ -154,7 +158,12 @@ struct Tier1OnboardingView: View {
                         title: "Health",
                         status: contextController.healthPermission,
                         canRetryWhenDenied: true,
-                        action: { Task { await contextController.requestHealthPermission() } }
+                        action: {
+                            Task {
+                                await contextController.requestHealthPermission()
+                                refreshPermissionSnapshots()
+                            }
+                        }
                     )
                 }
                 .kronikuCard(.semantics)
@@ -286,6 +295,22 @@ struct Tier1OnboardingView: View {
                     }
                 }
                 .kronikuCard(.semantics)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Sleep tracking")
+                        .font(.headline.weight(.semibold))
+                        .fontDesign(.rounded)
+
+                    Text("Optional: adds \"Went to bed\" and \"Woke up\" memories from HealthKit sleep data.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("Sleep tracking", isOn: Binding(
+                        get: { contextController.consent.sleepTrackingEnabled },
+                        set: { contextController.setSleepTrackingEnabled($0) }
+                    ))
+                }
+                .kronikuCard(.semantics)
             }
         }
     }
@@ -342,6 +367,11 @@ struct Tier1OnboardingView: View {
                 await contextController.syncCalendarEvents(into: repo)
             }
         }
+    }
+
+    private func refreshPermissionSnapshots() {
+        contextController.refreshPermissions()
+        tier2Controller.refreshPermissions()
     }
 
     private func permissionRow(title: String, status: PermissionState, canRetryWhenDenied: Bool = false, action: @escaping () -> Void) -> some View {

@@ -153,8 +153,8 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             detail: detail,
             context: title,
             contextCard: ContextCard(source: source, category: "derived", summary: detail ?? title, metadata: metadata),
-            symbolName: source == "workout" ? "figure.run" : (motion == .walking ? "figure.walk" : "car.fill"),
-            colorName: source == "workout" ? "green" : "teal",
+            symbolName: Self.symbolName(source: source, title: title, motion: motion),
+            colorName: Self.colorName(source: source, title: title),
             confidenceScore: confidenceScore,
             derivedEndedAt: endedAt
         )
@@ -168,6 +168,24 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
 
         NotificationCenter.default.post(name: .memoryRepositoryChanged, object: nil)
         return event
+    }
+
+    private static func symbolName(source: String, title: String, motion: MotionState?) -> String {
+        switch source {
+        case "workout": return "figure.run"
+        case "geofence": return "mappin.circle"
+        case "sleep": return title == "Woke up" ? "sun.max.fill" : "moon.stars.fill"
+        default: return motion == .walking ? "figure.walk" : "car.fill"
+        }
+    }
+
+    private static func colorName(source: String, title: String) -> String {
+        switch source {
+        case "workout": return "green"
+        case "geofence": return "indigo"
+        case "sleep": return title == "Woke up" ? "orange" : "indigo"
+        default: return "teal"
+        }
     }
 
     func reconcileDerivedEvents(_ drafts: [DerivedEventDraft], in interval: DateInterval) throws {
@@ -190,7 +208,8 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
                 let event = existing.remove(at: bestIndex)
                 changed = apply(draft, to: event) || changed
             } else {
-                insertDerivedEvent(draft)
+                let prior = bestIndex.map { existing[$0] }
+                insertDerivedEvent(draft, preserving: prior)
                 changed = true
             }
         }
@@ -217,12 +236,14 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
     private func apply(_ draft: DerivedEventDraft, to event: MemoryEvent) -> Bool {
         let oldMotion = event.contextCard?.metadata.first(where: { $0.key == "motion" })?.value
         let newMotion = draft.motion?.rawValue
+        let oldBluetooth = event.contextCard?.metadata.first(where: { $0.key == "bluetoothContext" })?.value
+        let newBluetooth = draft.bluetoothContext?.rawValue
         let placeChanged = event.place?.name != draft.place?.name ||
             event.place?.latitude != draft.place?.coordinate.latitude ||
             event.place?.longitude != draft.place?.coordinate.longitude
         let changed = event.occurredAt != draft.occurredAt || event.derivedEndedAt != draft.endedAt ||
-            event.detail != draft.detail || oldMotion != newMotion || placeChanged ||
-            event.confidenceScore != draft.confidenceScore
+            event.detail != draft.detail || oldMotion != newMotion || oldBluetooth != newBluetooth || placeChanged ||
+            event.confidenceScore != draft.confidenceScore || event.distanceMeters != draft.distanceMeters
         guard changed else { return false }
 
         event.occurredAt = draft.occurredAt
@@ -230,7 +251,11 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         event.detail = draft.detail
         event.context = draft.title
         let userMetadata = event.contextCard?.metadata.filter { $0.key == "userNote" || $0.key == "contacts" } ?? []
+        let healthSummary = event.healthSummary
         event.contextCard = derivedContextCard(for: draft, preserving: userMetadata)
+        event.healthSummary = healthSummary
+        event.distanceMeters = draft.distanceMeters
+        event.workoutRoute = draft.route
         event.symbolName = derivedSymbol(for: draft)
         event.colorName = draft.source == "workout" ? "green" : "teal"
         event.confidenceScore = draft.confidenceScore
@@ -241,20 +266,26 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         return true
     }
 
-    private func insertDerivedEvent(_ draft: DerivedEventDraft) {
+    private func insertDerivedEvent(_ draft: DerivedEventDraft, preserving prior: MemoryEvent? = nil) {
+        let userMetadata = prior?.contextCard?.metadata.filter { $0.key == "userNote" || $0.key == "contacts" } ?? []
         let event = MemoryEvent(
             occurredAt: draft.occurredAt,
             source: draft.source,
             title: draft.title,
             detail: draft.detail,
             context: draft.title,
-            contextCard: derivedContextCard(for: draft),
+            contextCard: derivedContextCard(for: draft, preserving: userMetadata),
             symbolName: derivedSymbol(for: draft),
             colorName: draft.source == "workout" ? "green" : "teal",
             confidenceScore: draft.confidenceScore,
             derivedEndedAt: draft.endedAt
         )
+        event.healthSummary = prior?.healthSummary
+        event.distanceMeters = draft.distanceMeters
+        event.workoutRoute = draft.route
         event.place = draft.place.map { Place(name: $0.name, latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
+        event.weatherSnapshot = prior?.weatherSnapshot
+        event.photoAttachments = prior?.photoAttachments ?? []
         modelContext.insert(event)
     }
 
@@ -268,20 +299,47 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         if let motion = draft.motion {
             metadata.append(.init(key: "motion", value: motion.rawValue))
         }
+        if let bluetoothContext = draft.bluetoothContext {
+            metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
+        }
         metadata.append(contentsOf: userMetadata)
         return ContextCard(source: draft.source, category: "derived", summary: draft.detail ?? draft.title, metadata: metadata)
     }
 
     private func derivedSymbol(for draft: DerivedEventDraft) -> String {
         if draft.source == "workout" { return "figure.run" }
+        if draft.title == "Stop" { return "parkingsign.circle" }
         return draft.motion == .walking ? "figure.walk" : "car.fill"
     }
 
     func syncCalendarEvents(_ imported: [TimelineCalendarImportEvent], for day: Date, attendeeLocationSharingEnabled: Bool) throws {
         let calendar = Calendar.current
-        let existing = fetchAll().filter {
+        var existing = fetchAll().filter {
             $0.source == "calendar" && ($0.occurredAt.map { calendar.isDate($0, inSameDayAs: day) } ?? false)
         }
+
+        // Collapses duplicates that share the same occurrence (start time + title) but lost their externalSourceID
+        // link across a sync round-trip — e.g. each device/reinstall previously pushed the same calendar item
+        // under its own random id, producing separate backend rows that all pull back down as separate events.
+        var survivorByOccurrence: [String: MemoryEvent] = [:]
+        var occurrenceDuplicates: [MemoryEvent] = []
+        for event in existing.sorted(by: { $0.createdAt < $1.createdAt }) {
+            guard let occurredAt = event.occurredAt, let title = event.title else { continue }
+            let key = "\(occurredAt.timeIntervalSince1970)|\(title)"
+            if let survivor = survivorByOccurrence[key] {
+                if survivor.externalSourceID == nil, let externalSourceID = event.externalSourceID {
+                    survivor.externalSourceID = externalSourceID
+                }
+                occurrenceDuplicates.append(event)
+            } else {
+                survivorByOccurrence[key] = event
+            }
+        }
+        for duplicate in occurrenceDuplicates {
+            removeCalendarEvent(duplicate)
+        }
+        existing.removeAll { candidate in occurrenceDuplicates.contains { $0 === candidate } }
+
         var existingByExternalID: [String: MemoryEvent] = [:]
         var duplicateExisting: [MemoryEvent] = []
         for event in existing {
@@ -297,6 +355,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         for duplicate in duplicateExisting {
             removeCalendarEvent(duplicate)
         }
+        existing.removeAll { candidate in duplicateExisting.contains { $0 === candidate } }
 
         var importedByExternalID: [String: TimelineCalendarImportEvent] = [:]
         for item in imported {
@@ -429,8 +488,16 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
                 scrubMetadata(keys: ["timeSemantics"], from: event)
             }
 
-            if !consent.healthConsent.isEnabled {
+            if consent.healthConsent.enabledMetrics.isEmpty {
                 event.healthSummary = nil
+            } else if let summary = event.healthSummary {
+                let allowed = consent.healthConsent.enabledMetrics
+                let retainedEntries = summary.entries.filter { allowed.contains($0.metric) }
+                if retainedEntries.isEmpty {
+                    event.healthSummary = nil
+                } else if retainedEntries.count != summary.entries.count {
+                    event.healthSummary = HealthSummary(capturedAt: summary.capturedAt, entries: retainedEntries)
+                }
             }
 
             if !consent.photoAttachmentEnabled {
@@ -510,8 +577,15 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         let contextData = event.syncContextData
         let payload = event.defaultEncryptedPayload
         let hash = event.defaultPayloadHash
+        let eventId: String
+        if event.source == "calendar", let externalSourceID = event.externalSourceID {
+            // Same calendar occurrence must upsert the same backend row no matter which device/reinstall pushes it.
+            eventId = Self.stableCalendarEventId(for: externalSourceID)
+        } else {
+            eventId = event.backendEventId ?? event.id.uuidString
+        }
         return PushEventRequest(
-            eventId: event.backendEventId ?? event.id.uuidString,
+            eventId: eventId,
             version: max(event.backendVersion, 1),
             occurredAt: event.occurredAt ?? event.updatedAt,
             source: event.source ?? "unknown",
@@ -530,7 +604,18 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
     }
 
     private func findStoredEvent(eventId: String) -> MemoryEvent? {
-        fetchStoredEvents().first { $0.backendEventId == eventId || $0.id.uuidString == eventId }
+        let events = fetchStoredEvents()
+        if let match = events.first(where: { $0.backendEventId == eventId || $0.id.uuidString == eventId }) {
+            return match
+        }
+        // Calendar events may have been pushed under a stable hash rather than their local id/backendEventId.
+        return events.first {
+            $0.source == "calendar" && $0.externalSourceID.map(Self.stableCalendarEventId) == eventId
+        }
+    }
+
+    private static func stableCalendarEventId(for externalSourceID: String) -> String {
+        SHA256.hash(data: Data("calendar:\(externalSourceID)".utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private func makeLocalEvent(from remote: PullEventResponse) -> MemoryEvent {
@@ -561,11 +646,30 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
     static func apply(contextData: SyncEventContextData?, to event: MemoryEvent) {
         guard let contextData else { return }
 
+        if let externalSourceID = contextData.externalSourceID {
+            event.externalSourceID = externalSourceID
+            if event.source == "calendar" {
+                event.isReadOnlySource = true
+            }
+        }
+
         event.place = contextData.place.map {
             Place(name: $0.name, latitude: $0.latitude, longitude: $0.longitude)
         }
         event.weatherSnapshot = contextData.weather.map {
             WeatherSnapshot(observedAt: $0.observedAt, condition: $0.condition, temperatureC: $0.temperatureC)
+        }
+        event.healthSummary = contextData.healthSummary.map { entries in
+            HealthSummary(
+                capturedAt: Date(),
+                entries: entries.compactMap { entry in
+                    Tier1HealthMetric(rawValue: entry.metric).map { .init(metric: $0, value: entry.value) }
+                }
+            )
+        }
+        event.distanceMeters = contextData.distanceMeters
+        event.workoutRoute = contextData.workoutRoute.map { route in
+            WorkoutRoute(coordinates: route.coordinates.map { GeoCoordinate(latitude: $0.latitude, longitude: $0.longitude) })
         }
 
         var card = event.contextCard ?? ContextCard(
@@ -573,9 +677,12 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             category: "moment",
             summary: event.title ?? ""
         )
-        card.metadata.removeAll { $0.key == "motion" || $0.key == "timeSemantics" || $0.key == "contacts" || $0.key == "userNote" || $0.key == "endedAt" }
+        card.metadata.removeAll { $0.key == "motion" || $0.key == "bluetoothContext" || $0.key == "timeSemantics" || $0.key == "contacts" || $0.key == "userNote" || $0.key == "endedAt" }
         if let motion = contextData.motion {
             card.metadata.append(.init(key: "motion", value: motion))
+        }
+        if let bluetoothContext = contextData.bluetoothContext {
+            card.metadata.append(.init(key: "bluetoothContext", value: bluetoothContext))
         }
         if let timeSemantics = contextData.timeSemantics, !timeSemantics.isEmpty {
             card.metadata.append(.init(key: "timeSemantics", value: timeSemantics.joined(separator: ",")))
@@ -789,13 +896,20 @@ private extension MemoryEvent {
                 SyncWeatherData(observedAt: $0.observedAt, condition: $0.condition, temperatureC: $0.temperatureC)
             },
             motion: metadataByKey["motion"],
+            bluetoothContext: metadataByKey["bluetoothContext"],
             timeSemantics: timeSemantics,
             photoReferences: photoReferences,
             contacts: contactMoment?.contactNames.isEmpty == false
                 ? contactMoment?.contactNames
                 : metadataByKey["contacts"]?.split(separator: ",").map(String.init),
             userNote: metadataByKey["userNote"],
-            endedAt: contactMoment?.endedAt ?? derivedEndedAt
+            endedAt: contactMoment?.endedAt ?? derivedEndedAt,
+            healthSummary: healthSummary?.entries.map { SyncHealthEntryData(metric: $0.metric.rawValue, value: $0.value) },
+            distanceMeters: distanceMeters,
+            workoutRoute: workoutRoute.map { route in
+                SyncWorkoutRouteData(coordinates: route.coordinates.map { SyncGeoCoordinateData(latitude: $0.latitude, longitude: $0.longitude) })
+            },
+            externalSourceID: externalSourceID
         )
     }
 

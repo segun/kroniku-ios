@@ -20,20 +20,42 @@ struct SyncPhotoReference: Codable, Equatable {
     let addedAt: Date
 }
 
+struct SyncHealthEntryData: Codable, Equatable {
+    let metric: String
+    let value: String
+}
+
+struct SyncGeoCoordinateData: Codable, Equatable {
+    let latitude: Double
+    let longitude: Double
+}
+
+struct SyncWorkoutRouteData: Codable, Equatable {
+    let coordinates: [SyncGeoCoordinateData]
+}
+
 struct SyncEventContextData: Codable, Equatable {
     let place: SyncPlaceData?
     let weather: SyncWeatherData?
     let motion: String?
+    let bluetoothContext: String?
     let timeSemantics: [String]?
     let photoReferences: [SyncPhotoReference]?
     let contacts: [String]?
     let userNote: String?
     let endedAt: Date?
+    let healthSummary: [SyncHealthEntryData]?
+    let distanceMeters: Double?
+    let workoutRoute: SyncWorkoutRouteData?
+    // Stable EventKit identifier for calendar-sourced events; lets other devices reconcile the same occurrence.
+    let externalSourceID: String?
 
     var isEmpty: Bool {
-        place == nil && weather == nil && motion == nil &&
+        place == nil && weather == nil && motion == nil && bluetoothContext == nil &&
         (timeSemantics?.isEmpty ?? true) && (photoReferences?.isEmpty ?? true) &&
-        (contacts?.isEmpty ?? true) && (userNote?.isEmpty ?? true) && endedAt == nil
+        (contacts?.isEmpty ?? true) && (userNote?.isEmpty ?? true) && endedAt == nil &&
+        (healthSummary?.isEmpty ?? true) && distanceMeters == nil && workoutRoute == nil &&
+        externalSourceID == nil
     }
 }
 

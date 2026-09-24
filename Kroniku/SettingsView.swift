@@ -5,6 +5,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case preferences = "Preferences"
     case contextSources = "Memory Details"
+    case places = "Places"
     case health = "Health"
     case permissions = "Permissions"
 
@@ -15,6 +16,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: return "person.crop.circle"
         case .preferences: return "slider.horizontal.3"
         case .contextSources: return "sparkles"
+        case .places: return "mappin.circle"
         case .health: return "heart"
         case .permissions: return "hand.raised"
         }
@@ -27,10 +29,13 @@ struct SettingsView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var contextController: Tier1ContextController
     @EnvironmentObject private var tier2Controller: Tier2ContextController
+    @ObservedObject private var geofenceStore = GeofenceStore.shared
 
     @State private var selectedSection: SettingsSection = .general
+    @State private var showsAddGeofenceSheet = false
     @State private var retrievalOptIn = false
     @State private var isUpdatingRetrievalOptIn = false
     @State private var isExporting = false
@@ -57,6 +62,8 @@ struct SettingsView: View {
                                 preferencesSection
                             case .contextSources:
                                 contextSourcesSection
+                            case .places:
+                                placesSection
                             case .health:
                                 healthSection
                             case .permissions:
@@ -70,12 +77,21 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .onAppear {
-                contextController.refreshPermissions()
-                tier2Controller.refreshPermissions()
+                refreshPermissionSnapshots()
                 retrievalOptIn = (try? AuthService.shared.getRetrievalOptIn()) ?? false
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                guard newPhase == .active else { return }
+                refreshPermissionSnapshots()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openPlacesSettingsRequested)) { _ in
+                selectedSection = .places
             }
             .sheet(item: $exportedFileURL) { identifiable in
                 ShareSheet(activityItems: [identifiable.url])
+            }
+            .sheet(isPresented: $showsAddGeofenceSheet) {
+                AddGeofenceSheet()
             }
             .alert("Delete account", isPresented: $showsDeleteConfirmation) {
                 Button("Delete", role: .destructive) { deleteAccount() }
@@ -333,6 +349,41 @@ struct SettingsView: View {
                         .kronikuCard(.calendar)
     }
 
+    private var placesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Places")
+                .font(.headline.weight(.semibold))
+                .fontDesign(.rounded)
+            Text("Get an Arrived/Left memory when you enter or leave a saved place, like home or the office.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            ForEach(geofenceStore.places) { place in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(place.name).font(.subheadline.weight(.semibold))
+                        Text("\(Int(place.radiusMeters)) m radius").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        geofenceStore.remove(place.id)
+                        contextController.refreshGeofenceMonitoringIfNeeded()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Button {
+                showsAddGeofenceSheet = true
+            } label: {
+                Label("Add place", systemImage: "plus.circle")
+            }
+        }
+        .kronikuCard(.context)
+    }
+
     private var healthSection: some View {
         VStack(alignment: .leading, spacing: 10) {
                             Text("Health")
@@ -345,6 +396,16 @@ struct SettingsView: View {
                             ForEach(Tier1HealthMetric.allCases) { metric in
                                 Toggle(metric.title, isOn: healthMetricBinding(metric))
                             }
+
+                            Divider()
+
+                            Toggle("Sleep tracking", isOn: Binding(
+                                get: { contextController.consent.sleepTrackingEnabled },
+                                set: { contextController.setSleepTrackingEnabled($0) }
+                            ))
+                            Text("Adds \"Went to bed\" and \"Woke up\" memories from HealthKit sleep data.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
 
                         }
                         .kronikuCard(.semantics)
@@ -404,6 +465,17 @@ struct SettingsView: View {
                                 title: "Motion",
                                 status: contextController.motionPermission,
                                 action: { Task { await contextController.requestMotionPermission() } }
+                            )
+                            permissionRow(
+                                title: "Health",
+                                status: contextController.healthPermission,
+                                canRetryWhenDenied: true,
+                                action: {
+                                    Task {
+                                        await contextController.requestHealthPermission()
+                                        refreshPermissionSnapshots()
+                                    }
+                                }
                             )
                         }
                         .kronikuCard(.context)
@@ -471,6 +543,11 @@ struct SettingsView: View {
                 await contextController.syncCalendarEvents(into: repo)
             }
         }
+    }
+
+    private func refreshPermissionSnapshots() {
+        contextController.refreshPermissions()
+        tier2Controller.refreshPermissions()
     }
 
     private func permissionRow(title: String, status: PermissionState, isBusy: Bool = false, canRetryWhenDenied: Bool = false, action: @escaping () -> Void) -> some View {

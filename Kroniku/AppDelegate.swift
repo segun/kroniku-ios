@@ -23,6 +23,7 @@ final class KronikuAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         resumeMonitoringIfConsented()
+        ContextRequestStore.shared.syncAppBadge()
     }
 
     /// Reuses `KronikuModelContainer.shared` — a second, independently created `ModelContainer` for the
@@ -38,32 +39,34 @@ final class KronikuAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
     }
 
     private func resumeMonitoringIfConsented() {
-        guard Tier1ConsentStore().consent.backgroundTripDetectionEnabled else { return }
-        CoreLocationVisitProvider.shared.startBackgroundMonitoring()
-        CoreMotionStateProvider.shared.startContinuousUpdates()
-        HealthKitWorkoutObserver.shared.startBackgroundDelivery()
+        let consent = Tier1ConsentStore().consent
+        if consent.backgroundTripDetectionEnabled {
+            CoreLocationVisitProvider.shared.startBackgroundMonitoring()
+            CoreMotionStateProvider.shared.startContinuousUpdates()
+            HealthKitWorkoutObserver.shared.startBackgroundDelivery()
+        }
+        if consent.sleepTrackingEnabled {
+            HealthKitSleepObserver.shared.startBackgroundDelivery()
+        }
     }
 
-    /// Shows the notification banner even while Kroniku is in the foreground.
+    /// Context requests are already visible in the in-app inbox, so foreground delivery stays quiet.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound, .list])
+        if notification.request.content.userInfo["kind"] as? String == "contextRequest" {
+            completionHandler([])
+        } else {
+            completionHandler([.banner, .sound, .list])
+        }
     }
 
-    /// Tapping a "name this place" notification opens the naming sheet via `.namePlaceRequested`.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let userInfo = response.notification.request.content.userInfo
-        if userInfo["kind"] as? String == "namePlace",
-           let latitude = userInfo["latitude"] as? Double,
-           let longitude = userInfo["longitude"] as? Double {
+        if userInfo["kind"] as? String == "contextRequest",
+           let requestIDRaw = userInfo["requestID"] as? String,
+           let requestID = UUID(uuidString: requestIDRaw) {
+            UserDefaults.standard.set(requestID.uuidString, forKey: "pendingContextRequestID")
             Task { @MainActor in
-                NotificationCenter.default.post(name: .namePlaceRequested, object: nil, userInfo: ["latitude": latitude, "longitude": longitude])
-            }
-        }
-        if userInfo["kind"] as? String == "tripStop",
-           let eventIDRaw = userInfo["eventID"] as? String,
-           let eventID = UUID(uuidString: eventIDRaw) {
-            Task { @MainActor in
-                NotificationCenter.default.post(name: .tripStopContextRequested, object: nil, userInfo: ["eventID": eventID])
+                NotificationCenter.default.post(name: .contextRequestOpened, object: nil, userInfo: ["requestID": requestID])
             }
         }
         completionHandler()

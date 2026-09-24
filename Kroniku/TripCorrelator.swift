@@ -1,4 +1,5 @@
 import Foundation
+import CoreLocation
 
 private enum ReconciledMotionCategory: String, Codable {
     case driving
@@ -30,12 +31,15 @@ private enum ReconciledMotionCategory: String, Codable {
 private struct MotionObservation: Codable, Hashable {
     var timestamp: Date
     var state: MotionState
+    var bluetoothContext: BluetoothContextKind?
 }
 
 private struct WorkoutObservation: Codable, Hashable {
     var title: String
     var startedAt: Date
     var endedAt: Date
+    var distanceMeters: Double?
+    var route: WorkoutRoute?
 }
 
 private struct CorrelationObservationStore: Codable {
@@ -51,31 +55,41 @@ final class TripCorrelator {
     private let repository: MemoryRepositoryProtocol
     private let defaults: UserDefaults
     private let weatherProvider: WeatherContextProviding
+    private let healthProvider: HealthContextProviding
     private let consentStore: Tier1ConsentStore
+    private let contextRequestStore: ContextRequestStore
     private var observations: CorrelationObservationStore
     private var subscriptionTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
     private var weatherEnrichmentTask: Task<Void, Never>?
+    private var healthEnrichmentTask: Task<Void, Never>?
 
     private static let observationStoreKey = "timelineCorrelationObservationsV2"
     private static let retentionWindow: TimeInterval = 2 * 24 * 60 * 60
     private static let minimumDriveDuration: TimeInterval = 2 * 60
     private static let minimumWalkDuration: TimeInterval = 5 * 60
+    private static let minimumStopDuration: TimeInterval = 2 * 60
+    private static let maximumStopDuration: TimeInterval = 90 * 60
     private static let maximumInferredMotionDuration: TimeInterval = 2 * 60 * 60
     private static let locationBoundaryTolerance: TimeInterval = 5 * 60
     private static let weatherReuseWindow: TimeInterval = 90 * 60
+    private static let historicalWeatherWindow: TimeInterval = 2 * 24 * 60 * 60
     private static let duplicateWorkoutCoverage = 0.8
 
     init(
         repository: MemoryRepositoryProtocol,
         defaults: UserDefaults = .standard,
         weatherProvider: WeatherContextProviding = WeatherKitSnapshotProvider(),
-        consentStore: Tier1ConsentStore = Tier1ConsentStore()
+        healthProvider: HealthContextProviding = HealthKitSummaryProvider(),
+        consentStore: Tier1ConsentStore = Tier1ConsentStore(),
+        contextRequestStore: ContextRequestStore = .shared
     ) {
         self.repository = repository
         self.defaults = defaults
         self.weatherProvider = weatherProvider
+        self.healthProvider = healthProvider
         self.consentStore = consentStore
+        self.contextRequestStore = contextRequestStore
         self.observations = defaults.data(forKey: Self.observationStoreKey)
             .flatMap { try? JSONDecoder.iso8601.decode(CorrelationObservationStore.self, from: $0) }
             ?? CorrelationObservationStore()
@@ -85,6 +99,7 @@ final class TripCorrelator {
     func start() async {
         subscriptionTask?.cancel()
         reconcile()
+        // cleanupDuplicateSleepEvents()
         let stream = await KronikuEventBus.shared.subscribe()
         subscriptionTask = Task { [weak self] in
             for await event in stream {
@@ -100,6 +115,8 @@ final class TripCorrelator {
         reconciliationTask = nil
         weatherEnrichmentTask?.cancel()
         weatherEnrichmentTask = nil
+        healthEnrichmentTask?.cancel()
+        healthEnrichmentTask = nil
     }
 
     func handle(_ event: KronikuEvent) {
@@ -124,7 +141,11 @@ final class TripCorrelator {
                 return
             }
             observations.motion.removeAll { $0.timestamp == event.timestamp }
-            observations.motion.append(MotionObservation(timestamp: event.timestamp, state: state))
+            observations.motion.append(MotionObservation(
+                timestamp: event.timestamp,
+                state: state,
+                bluetoothContext: event.metadata["bluetoothContext"].flatMap(BluetoothContextKind.init(rawValue:))
+            ))
 
         case .workoutEnded:
             guard let workout = normalizedWorkout(from: event) else {
@@ -137,8 +158,21 @@ final class TripCorrelator {
                     abs($0.endedAt.timeIntervalSince(workout.endedAt)) <= 2
             }
             observations.workouts.append(workout)
+            healthEnrichmentTask?.cancel()
+            healthEnrichmentTask = Task { [weak self] in
+                guard let self else { return }
+                await self.enrichWorkoutHealth(workout)
+            }
 
         case .workoutStarted:
+            return
+
+        case .geofenceEntered, .geofenceExited:
+            handleGeofenceEvent(event)
+            return
+
+        case .sleepAnalysisRecorded:
+            handleSleepEvent(event)
             return
         }
 
@@ -165,7 +199,8 @@ final class TripCorrelator {
         let workouts = canonicalWorkouts()
         let workoutDrafts = workouts.map(workoutDraft)
         let motionDrafts = canonicalMotionDrafts(excluding: workouts.map { DateInterval(start: $0.startedAt, end: $0.endedAt) })
-        let drafts = (workoutDrafts + motionDrafts).sorted { $0.occurredAt < $1.occurredAt }
+        let stopDrafts = stopDrafts(between: motionDrafts)
+        let drafts = (workoutDrafts + motionDrafts + stopDrafts).sorted { $0.occurredAt < $1.occurredAt }
 
         do {
             try repository.reconcileDerivedEvents(drafts, in: interval)
@@ -174,7 +209,9 @@ final class TripCorrelator {
                     "locations=\(observations.locations.count) workouts=\(observations.workouts.count) " +
                     "derived=\(drafts.count)"
             )
+                    enqueueContextRequests(for: stopDrafts)
                     scheduleWeatherEnrichment()
+                    scheduleHealthEnrichment()
         } catch {
             SensorDiagnostics.log("RECONCILER failed error=\(error.localizedDescription)")
         }
@@ -189,17 +226,107 @@ final class TripCorrelator {
         }
     }
 
-    private func enrichMissingWeather() async {
-        let allEvents = repository.fetchAll()
-        let candidates = allEvents.filter {
-            ($0.source == "trip" || $0.source == "workout") && $0.weatherSnapshot == nil && $0.place != nil
+    private func scheduleHealthEnrichment() {
+          guard consentStore.consent.healthAuthorizationState == .authorized,
+              !consentStore.consent.healthConsent.enabledMetrics.isEmpty else { return }
+        healthEnrichmentTask?.cancel()
+        healthEnrichmentTask = Task { [weak self] in
+            guard let self else { return }
+            await self.enrichMissingWorkoutHealth()
+            await self.enrichMissingSleepHealth()
+        }
+    }
+
+    private func enrichMissingWorkoutHealth() async {
+        let metrics = consentStore.consent.healthConsent.enabledMetrics
+        guard consentStore.consent.healthAuthorizationState == .authorized, !metrics.isEmpty else { return }
+        let candidates = repository.fetchAll().filter {
+            $0.source == "workout" && $0.healthSummary == nil && !$0.isDeleted
         }
 
         for event in candidates where !Task.isCancelled {
-            guard let coordinate = coordinate(for: event.place),
-                  let startedAt = event.occurredAt,
-                  let endedAt = event.derivedEndedAt else { continue }
+            guard let start = event.occurredAt,
+                  let end = event.derivedEndedAt,
+                  end > start else { continue }
+            await attachHealthSummary(to: event, interval: DateInterval(start: start, end: end), metrics: metrics)
+        }
+    }
+
+    /// Mirrors `enrichMissingWorkoutHealth`, so a "Woke up" memory that missed enrichment (e.g. health
+    /// consent was granted after the sleep event was created) gets retried on every reconcile pass too,
+    /// instead of only when the HealthKit sleep observer happens to fire again.
+    private func enrichMissingSleepHealth() async {
+        guard consentStore.consent.sleepTrackingEnabled else { return }
+        let metrics = consentStore.consent.healthConsent.enabledMetrics
+        guard consentStore.consent.healthAuthorizationState == .authorized, !metrics.isEmpty else { return }
+        let sleepEvents = repository.fetchAll().filter { $0.source == "sleep" && !$0.isDeleted }
+        let bedtimes = sleepEvents.filter { $0.title == "Went to bed" }.compactMap(\.occurredAt).sorted()
+        let candidates = sleepEvents.filter { $0.title == "Woke up" && $0.healthSummary == nil }
+
+        for event in candidates where !Task.isCancelled {
+            guard let wakeTime = event.occurredAt,
+                  let bedTime = bedtimes.last(where: { $0 < wakeTime }) else { continue }
+            await attachHealthSummary(to: event, interval: DateInterval(start: bedTime, end: wakeTime), metrics: metrics)
+        }
+    }
+
+    private func enrichWorkoutHealth(_ workout: WorkoutObservation) async {
+        let consent = consentStore.consent
+        let metrics = consent.healthConsent.enabledMetrics
+        guard consent.healthAuthorizationState == .authorized, !metrics.isEmpty else { return }
+        let interval = DateInterval(start: workout.startedAt, end: workout.endedAt)
+        let event = repository.fetchAll().first {
+            $0.source == "workout" && $0.title == workout.title &&
+                abs(($0.occurredAt ?? .distantPast).timeIntervalSince(workout.startedAt)) <= 2 &&
+                abs(($0.derivedEndedAt ?? .distantPast).timeIntervalSince(workout.endedAt)) <= 2
+        }
+        guard let event else { return }
+        await attachHealthSummary(to: event, interval: interval, metrics: metrics)
+    }
+
+    private func attachHealthSummary(to event: MemoryEvent, interval: DateInterval, metrics: Set<Tier1HealthMetric>) async {
+        guard let summary = await healthProvider.summary(in: interval, metrics: metrics), !summary.isEmpty else { return }
+        event.healthSummary = summary
+        do {
+            try repository.update(event: event)
+        } catch {
+            SensorDiagnostics.log(
+                "RECONCILER health saveFailed event=\(event.id) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func enrichMissingWeather() async {
+        let allEvents = repository.fetchAll()
+        let candidates = allEvents.filter {
+            ($0.source == "trip" || $0.source == "workout") && $0.weatherSnapshot == nil
+        }
+
+        for event in candidates where !Task.isCancelled {
+            guard let startedAt = event.occurredAt,
+                  let endedAt = event.derivedEndedAt else {
+                SensorDiagnostics.log(
+                    "RECONCILER weather skipped event=\(event.id) reason=missingTimeRange"
+                )
+                continue
+            }
+            guard let coordinate = coordinate(for: event.place) else {
+                SensorDiagnostics.log(
+                    "RECONCILER weather skipped event=\(event.id) reason=missingCoordinate " +
+                        "start=\(SensorDiagnostics.timestamp(startedAt)) " +
+                        "end=\(SensorDiagnostics.timestamp(endedAt))"
+                )
+                continue
+            }
             let midpoint = startedAt.addingTimeInterval(endedAt.timeIntervalSince(startedAt) / 2)
+            let age = Date().timeIntervalSince(endedAt)
+            SensorDiagnostics.log(
+                "RECONCILER weather candidate event=\(event.id) source=\(event.source ?? "unknown") " +
+                    "start=\(SensorDiagnostics.timestamp(startedAt)) " +
+                    "end=\(SensorDiagnostics.timestamp(endedAt)) " +
+                    "midpoint=\(SensorDiagnostics.timestamp(midpoint)) " +
+                    "place=\(event.place?.name ?? "unknown") ageSeconds=\(Int(age))"
+            )
 
             if let nearbyWeather = nearestStoredWeather(
                 in: DateInterval(start: startedAt, end: endedAt),
@@ -212,20 +339,50 @@ final class TripCorrelator {
                     condition: nearbyWeather.condition,
                     temperatureC: nearbyWeather.temperatureC
                 )
-                try? repository.update(event: event)
-                SensorDiagnostics.log("RECONCILER weather reused event=\(event.id)")
+                do {
+                    try repository.update(event: event)
+                    SensorDiagnostics.log("RECONCILER weather reused event=\(event.id)")
+                } catch {
+                    SensorDiagnostics.log(
+                        "RECONCILER weather saveFailed event=\(event.id) " +
+                            "source=reused error=\(error.localizedDescription)"
+                    )
+                }
                 continue
             }
 
-            guard abs(Date().timeIntervalSince(endedAt)) <= Self.weatherReuseWindow,
-                  let reading = await weatherProvider.weather(at: Date(), coordinate: coordinate) else { continue }
+            guard abs(age) <= Self.historicalWeatherWindow else {
+                SensorDiagnostics.log(
+                    "RECONCILER weather skipped event=\(event.id) reason=outsideWindow " +
+                        "ageSeconds=\(Int(age)) windowSeconds=\(Int(Self.historicalWeatherWindow))"
+                )
+                continue
+            }
+            guard let reading = await weatherProvider.weather(at: midpoint, coordinate: coordinate) else {
+                SensorDiagnostics.log(
+                    "RECONCILER weather providerReturnedNil event=\(event.id) " +
+                        "requestedAt=\(SensorDiagnostics.timestamp(midpoint))"
+                )
+                continue
+            }
             event.weatherSnapshot = WeatherSnapshot(
                 observedAt: reading.observedAt,
                 condition: reading.condition,
                 temperatureC: reading.temperatureC
             )
-            try? repository.update(event: event)
-            SensorDiagnostics.log("RECONCILER weather fetched event=\(event.id)")
+            do {
+                try repository.update(event: event)
+                SensorDiagnostics.log(
+                    "RECONCILER weather fetched event=\(event.id) " +
+                        "requestedAt=\(SensorDiagnostics.timestamp(midpoint)) " +
+                        "observedAt=\(SensorDiagnostics.timestamp(reading.observedAt))"
+                )
+            } catch {
+                SensorDiagnostics.log(
+                    "RECONCILER weather saveFailed event=\(event.id) " +
+                        "source=fetched error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -298,16 +455,35 @@ final class TripCorrelator {
     private func workoutDraft(_ workout: WorkoutObservation) -> DerivedEventDraft {
         let interval = DateInterval(start: workout.startedAt, end: workout.endedAt)
         let minutes = max(1, Int((interval.duration / 60).rounded()))
+        var detail = "\(minutes) min"
+        if let distanceMeters = workout.distanceMeters {
+            detail += " · \(String(format: "%.1f", distanceMeters / 1000)) km"
+        }
         return DerivedEventDraft(
             source: "workout",
             title: workout.title,
-            detail: "\(minutes) min",
+            detail: detail,
             occurredAt: workout.startedAt,
             endedAt: workout.endedAt,
             motion: nil,
+            bluetoothContext: bluetoothContext(in: interval),
             place: locations(in: interval).last,
-            confidenceScore: 1
+            confidenceScore: 1,
+            distanceMeters: workout.distanceMeters,
+            route: workout.route
         )
+    }
+
+    private func bluetoothContext(in interval: DateInterval) -> BluetoothContextKind? {
+        guard consentStore.consent.bluetoothContextEnabled else { return nil }
+        let startWithTolerance = interval.start.addingTimeInterval(-Self.locationBoundaryTolerance)
+        return observations.motion
+            .filter { $0.timestamp >= startWithTolerance && $0.timestamp <= interval.end }
+            .compactMap { observation in
+                observation.bluetoothContext.map { (observation.timestamp, $0) }
+            }
+            .max { $0.0 < $1.0 }?
+            .1
     }
 
     private func canonicalMotionDrafts(excluding authoritativeIntervals: [DateInterval]) -> [DerivedEventDraft] {
@@ -335,7 +511,12 @@ final class TripCorrelator {
                     SensorDiagnostics.log("RECONCILER ignored drive reason=noFreshLocation")
                     continue
                 }
-                drafts.append(motionDraft(category: category, interval: interval, locations: evidence))
+                drafts.append(motionDraft(
+                    category: category,
+                    interval: interval,
+                    locations: evidence,
+                    bluetoothContext: current.bluetoothContext
+                ))
             }
         }
         return drafts
@@ -354,19 +535,25 @@ final class TripCorrelator {
     private func motionDraft(
         category: ReconciledMotionCategory,
         interval: DateInterval,
-        locations: [VisitSnapshot]
+        locations: [VisitSnapshot],
+        bluetoothContext: BluetoothContextKind?
     ) -> DerivedEventDraft {
         let minutes = max(1, Int((interval.duration / 60).rounded()))
         let names = locations.map(\.name).reduce(into: [String]()) { names, name in
             if names.last != name { names.append(name) }
         }
-        let route: String?
+        let routeText: String?
         if names.count >= 2 {
-            route = "\(names.first!) → \(names.last!)"
+            routeText = "\(names.first!) → \(names.last!)"
         } else {
-            route = names.first
+            routeText = names.first
         }
-        let detail = [route, "\(minutes) min"].compactMap { $0 }.joined(separator: " · ")
+        let detail = [routeText, "\(minutes) min"].compactMap { $0 }.joined(separator: " · ")
+        // Coarse route from significant-location-change points; not a continuous GPS trace like a workout's.
+        let route = category == .driving && locations.count >= 2
+            ? WorkoutRoute(coordinates: locations.map(\.coordinate))
+            : nil
+        let distanceMeters = category == .driving ? Self.coarseDistanceMeters(for: locations) : nil
         return DerivedEventDraft(
             source: "trip",
             title: category.title,
@@ -374,9 +561,66 @@ final class TripCorrelator {
             occurredAt: interval.start,
             endedAt: interval.end,
             motion: category.motionState,
+            bluetoothContext: bluetoothContext,
             place: locations.first,
-            confidenceScore: category == .driving ? 0.8 : 0.7
+            confidenceScore: category == .driving ? 0.8 : 0.7,
+            distanceMeters: distanceMeters,
+            route: route
         )
+    }
+
+    private static func coarseDistanceMeters(for locations: [VisitSnapshot]) -> Double? {
+        guard locations.count >= 2 else { return nil }
+        let clLocations = locations.map { CLLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
+        let total = zip(clLocations, clLocations.dropFirst()).reduce(0.0) { partial, pair in
+            partial + pair.0.distance(from: pair.1)
+        }
+        return total > 0 ? total : nil
+    }
+
+
+    private func stopDrafts(between motionDrafts: [DerivedEventDraft]) -> [DerivedEventDraft] {
+        let drives = motionDrafts
+            .filter { $0.motion == .driving }
+            .sorted { $0.occurredAt < $1.occurredAt }
+        guard drives.count >= 2 else { return [] }
+
+        return zip(drives, drives.dropFirst()).compactMap { previous, next in
+            let duration = next.occurredAt.timeIntervalSince(previous.endedAt)
+            guard duration >= Self.minimumStopDuration,
+                  duration <= Self.maximumStopDuration,
+                  let place = next.place else { return nil }
+            let minutes = max(1, Int((duration / 60).rounded()))
+            return DerivedEventDraft(
+                source: "trip",
+                title: "Stop",
+                detail: "\(place.name) · \(minutes) min",
+                occurredAt: previous.endedAt,
+                endedAt: next.occurredAt,
+                motion: .stationary,
+                bluetoothContext: nil,
+                place: place,
+                confidenceScore: 0.8
+            )
+        }
+    }
+
+    private func enqueueContextRequests(for stopDrafts: [DerivedEventDraft]) {
+        let events = repository.fetchAll()
+        for draft in stopDrafts {
+            guard let event = events.first(where: {
+                $0.source == "trip" && $0.title == "Stop" &&
+                    abs(($0.occurredAt ?? .distantPast).timeIntervalSince(draft.occurredAt)) <= 2 &&
+                    abs(($0.derivedEndedAt ?? .distantPast).timeIntervalSince(draft.endedAt)) <= 2
+            }), let placeName = draft.place?.name else { continue }
+            let minutes = max(1, Int((draft.endedAt.timeIntervalSince(draft.occurredAt) / 60).rounded()))
+            contextRequestStore.enqueueStop(
+                eventID: event.id,
+                placeName: placeName,
+                durationMinutes: minutes,
+                createdAt: draft.endedAt
+            )
+        }
     }
 
     private func locations(in interval: DateInterval) -> [VisitSnapshot] {
@@ -425,11 +669,169 @@ final class TripCorrelator {
         guard suppliedCount >= 2 else { return nil }
         let derivedStart = start ?? end.addingTimeInterval(-(duration ?? 0))
         guard end > derivedStart else { return nil }
+        let distanceMeters = event.metadata["distanceMeters"].flatMap(Double.init)
+        let route = event.metadata["routeCoordinates"]
+            .flatMap { $0.data(using: .utf8) }
+            .flatMap { try? JSONDecoder().decode(WorkoutRoute.self, from: $0) }
         return WorkoutObservation(
             title: event.metadata["activityType"] ?? "Workout",
             startedAt: derivedStart,
-            endedAt: end
+            endedAt: end,
+            distanceMeters: distanceMeters,
+            route: route
         )
+    }
+
+    /// Creates an instantaneous "Arrived <place>"/"Left <place>" memory for a geofence transition.
+    private func handleGeofenceEvent(_ event: KronikuEvent) {
+        guard consentStore.consent.geofencingEnabled,
+              let regionId = event.metadata["regionId"],
+              let place = GeofenceStore.shared.place(forRegionId: regionId) else { return }
+        let isEntry = event.type == .geofenceEntered
+        do {
+            _ = try repository.addDerivedEvent(
+                source: "geofence",
+                title: isEntry ? "Arrived \(place.name)" : "Left \(place.name)",
+                detail: nil,
+                occurredAt: event.timestamp,
+                endedAt: event.timestamp,
+                motion: nil,
+                place: VisitSnapshot(
+                    name: place.name,
+                    coordinate: GeoCoordinate(latitude: place.latitude, longitude: place.longitude),
+                    capturedAt: event.timestamp
+                ),
+                confidenceScore: 1
+            )
+        } catch {
+            SensorDiagnostics.log("RECONCILER geofence saveFailed error=\(error.localizedDescription)")
+        }
+    }
+
+    // /// One-time sweep for duplicates left over from before `handleSleepEvent` checked persisted state
+    // /// (each relaunch re-published the same finalized session since the in-memory dedup set was empty again).
+    // /// Keeps the *richest* duplicate (detail + health summary present) rather than just the oldest one,
+    // /// since earlier runs may have been created before those enrichments existed.
+    // private func cleanupDuplicateSleepEvents() {
+    //     let sleepEvents = repository.fetchAll().filter { !$0.isDeleted && $0.source == "sleep" }
+    //     var groups: [String: [MemoryEvent]] = [:]
+    //     for candidate in sleepEvents {
+    //         guard let occurredAt = candidate.occurredAt, let title = candidate.title else { continue }
+    //         let key = "\(title)|\(Int(occurredAt.timeIntervalSince1970 / 60))"
+    //         groups[key, default: []].append(candidate)
+    //     }
+
+    //     for (_, group) in groups where group.count > 1 {
+    //         let richest = group.max { lhs, rhs in
+    //             richness(of: lhs) < richness(of: rhs) ||
+    //                 (richness(of: lhs) == richness(of: rhs) && lhs.createdAt < rhs.createdAt)
+    //         }
+    //         for duplicate in group where duplicate !== richest {
+    //             do {
+    //                 try repository.delete(event: duplicate)
+    //             } catch {
+    //                 SensorDiagnostics.log("RECONCILER sleep cleanupFailed error=\(error.localizedDescription)")
+    //             }
+    //         }
+    //     }
+    // }
+
+    private func richness(of event: MemoryEvent) -> Int {
+        (event.detail?.isEmpty == false ? 1 : 0) + (event.healthSummary?.entries.isEmpty == false ? 1 : 0)
+    }
+
+    /// Creates "Went to bed"/"Woke up" memories for a finalized HealthKit sleep session.
+    private func handleSleepEvent(_ event: KronikuEvent) {
+        guard consentStore.consent.sleepTrackingEnabled,
+              let bedTime = event.metadata["bedTime"].flatMap(ISO8601DateFormatter().date(from:)),
+              let wakeTime = event.metadata["wakeTime"].flatMap(ISO8601DateFormatter().date(from:)),
+              wakeTime > bedTime else { return }
+        let asleepSeconds = event.metadata["asleepSeconds"].flatMap(Double.init)
+        let inBedSeconds = event.metadata["inBedSeconds"].flatMap(Double.init)
+        let detail = Self.sleepSummaryDetail(asleepSeconds: asleepSeconds, inBedSeconds: inBedSeconds)
+
+        // The observer's in-memory publish dedup resets on every relaunch, so re-check against what's
+        // already persisted before inserting — otherwise the same finalized session gets recreated each run.
+        let existingSleepEvents = repository.fetchAll().filter { !$0.isDeleted && $0.source == "sleep" }
+        let existingBedtime = existingSleepEvents.first {
+            $0.title == "Went to bed" && abs(($0.occurredAt ?? .distantPast).timeIntervalSince(bedTime)) <= 60
+        }
+        let existingWake = existingSleepEvents.first {
+            $0.title == "Woke up" && abs(($0.occurredAt ?? .distantPast).timeIntervalSince(wakeTime)) <= 60
+        }
+
+        do {
+            if existingBedtime == nil {
+                _ = try repository.addDerivedEvent(
+                    source: "sleep",
+                    title: "Went to bed",
+                    detail: nil,
+                    occurredAt: bedTime,
+                    endedAt: bedTime,
+                    motion: nil,
+                    place: nil,
+                    confidenceScore: 1
+                )
+            }
+
+            let metrics = consentStore.consent.healthConsent.enabledMetrics
+            let healthEnrichmentEligible = consentStore.consent.healthAuthorizationState == .authorized && !metrics.isEmpty
+
+            let wakeEvent: MemoryEvent
+            if let existingWake {
+                // Backfills an older duplicate/relaunch's sparse record (created before detail/health enrichment
+                // existed, or before health consent was granted) rather than leaving it stuck bare forever.
+                guard existingWake.detail == nil || (healthEnrichmentEligible && existingWake.healthSummary == nil) else { return }
+                if existingWake.detail == nil {
+                    existingWake.detail = detail
+                    try repository.update(event: existingWake)
+                }
+                wakeEvent = existingWake
+            } else {
+                wakeEvent = try repository.addDerivedEvent(
+                    source: "sleep",
+                    title: "Woke up",
+                    detail: detail,
+                    occurredAt: wakeTime,
+                    endedAt: wakeTime,
+                    motion: nil,
+                    place: nil,
+                    confidenceScore: 1
+                )
+            }
+
+            guard healthEnrichmentEligible, wakeEvent.healthSummary == nil else { return }
+            healthEnrichmentTask?.cancel()
+            healthEnrichmentTask = Task { [weak self] in
+                guard let self else { return }
+                await self.attachHealthSummary(to: wakeEvent, interval: DateInterval(start: bedTime, end: wakeTime), metrics: metrics)
+            }
+        } catch {
+            SensorDiagnostics.log("RECONCILER sleep saveFailed error=\(error.localizedDescription)")
+        }
+    }
+
+    /// "7h 42m asleep · 8h 10m in bed · 94% efficient", trimmed to whatever pieces we have data for.
+    private static func sleepSummaryDetail(asleepSeconds: Double?, inBedSeconds: Double?) -> String? {
+        var parts: [String] = []
+        if let asleepSeconds {
+            parts.append("\(formatDuration(asleepSeconds)) asleep")
+        }
+        if let inBedSeconds {
+            parts.append("\(formatDuration(inBedSeconds)) in bed")
+        }
+        if let asleepSeconds, let inBedSeconds, inBedSeconds > 0 {
+            let efficiency = Int(((asleepSeconds / inBedSeconds) * 100).rounded())
+            parts.append("\(efficiency)% efficient")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func formatDuration(_ seconds: Double) -> String {
+        let totalMinutes = Int((seconds / 60).rounded())
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m"
     }
 
     private func locationObservation(from event: KronikuEvent) -> VisitSnapshot? {

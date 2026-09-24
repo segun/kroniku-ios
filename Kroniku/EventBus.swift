@@ -24,6 +24,9 @@ enum KronikuEventType: String, Codable {
     case motionChanged
     case workoutStarted
     case workoutEnded
+    case geofenceEntered
+    case geofenceExited
+    case sleepAnalysisRecorded
 }
 
 /// A single normalized signal from any background source, consumed by `TripCorrelator`.

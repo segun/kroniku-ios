@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 import EventKit
 import CoreLocation
 import CoreMotion
@@ -28,12 +29,17 @@ protocol LocationContextProviding {
     /// Starts significant-location-change monitoring, publishing events to `KronikuEventBus`.
     func startBackgroundMonitoring()
     func stopBackgroundMonitoring()
+    /// Starts CLCircularRegion enter/exit monitoring for the given saved places (capped at 20 by iOS).
+    func startMonitoringGeofences(_ places: [NamedGeofence])
+    func stopMonitoringGeofences()
 }
 
 extension LocationContextProviding {
     func requestAlwaysAccess() async -> PermissionState { authorizationState }
     func startBackgroundMonitoring() {}
     func stopBackgroundMonitoring() {}
+    func startMonitoringGeofences(_ places: [NamedGeofence]) {}
+    func stopMonitoringGeofences() {}
 }
 
 @MainActor
@@ -61,11 +67,26 @@ protocol HealthContextProviding {
     var authorizationState: PermissionState { get }
     func requestAccess(for metrics: Set<Tier1HealthMetric>) async -> PermissionState
     func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary?
+    func summary(in interval: DateInterval, metrics: Set<Tier1HealthMetric>) async -> HealthSummary?
+}
+
+extension HealthContextProviding {
+    func summary(in interval: DateInterval, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
+        await summary(for: interval.end, metrics: metrics)
+    }
 }
 
 /// Background HealthKit workout observation, independent of the Tier1 metric summaries above.
 @MainActor
 protocol WorkoutContextProviding {
+    func requestAccess() async -> PermissionState
+    func startBackgroundDelivery()
+    func stopBackgroundDelivery()
+}
+
+/// Background HealthKit sleep-analysis observation, surfaced as "Went to bed"/"Woke up" memories.
+@MainActor
+protocol SleepContextProviding {
     func requestAccess() async -> PermissionState
     func startBackgroundDelivery()
     func stopBackgroundDelivery()
@@ -126,10 +147,12 @@ final class Tier1ContextController: ObservableObject {
     private let motionProvider: MotionContextProviding
     private let healthProvider: HealthContextProviding
     private let workoutProvider: WorkoutContextProviding
+    private let sleepProvider: SleepContextProviding
     private let timeLabelProvider: TimeSemanticLabelProviding
     private var cachedCalendarEventsByDay: [Date: CachedCalendarDay] = [:]
     private var recentVisitSnapshot: VisitSnapshot?
     private var recentWeatherSnapshot: (coordinate: GeoCoordinate, reading: WeatherReading)?
+    private var consentCancellable: AnyCancellable?
 
     init(
         consentStore: Tier1ConsentStore = Tier1ConsentStore(),
@@ -139,6 +162,7 @@ final class Tier1ContextController: ObservableObject {
         motionProvider: MotionContextProviding = CoreMotionStateProvider.shared,
         healthProvider: HealthContextProviding = HealthKitSummaryProvider(),
         workoutProvider: WorkoutContextProviding = HealthKitWorkoutObserver.shared,
+        sleepProvider: SleepContextProviding = HealthKitSleepObserver.shared,
         timeLabelProvider: TimeSemanticLabelProviding = DefaultTimeSemanticLabelProvider()
     ) {
         self.consentStore = consentStore
@@ -148,12 +172,16 @@ final class Tier1ContextController: ObservableObject {
         self.motionProvider = motionProvider
         self.healthProvider = healthProvider
         self.workoutProvider = workoutProvider
+        self.sleepProvider = sleepProvider
         self.timeLabelProvider = timeLabelProvider
         // Defer permission introspection until a privacy UI/action path requests it.
         self.calendarPermission = .notDetermined
         self.locationPermission = .notDetermined
         self.motionPermission = .notDetermined
         self.healthPermission = .notDetermined
+        // consentStore is its own ObservableObject, so its changes (e.g. from a background Task after an
+        // async permission grant) wouldn't otherwise trigger a re-render of views observing this controller.
+        consentCancellable = consentStore.$consent.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     var consent: Tier1ConsentState { consentStore.consent }
@@ -163,6 +191,7 @@ final class Tier1ContextController: ObservableObject {
             $0.hasCompletedOnboarding = true
             $0.needsOnboardingResume = false
         }
+        ContextRequestStore.shared.enqueuePlacesSetupPromptIfNeeded()
     }
 
     func markOnboardingDismissed(at page: Int) {
@@ -206,6 +235,14 @@ final class Tier1ContextController: ObservableObject {
         }
     }
 
+    func healthSummary(in interval: DateInterval) async -> HealthSummary? {
+        let metrics = consent.healthConsent.enabledMetrics
+        guard consent.healthConsent.isEnabled,
+              consent.healthAuthorizationState == .authorized,
+              !metrics.isEmpty else { return nil }
+        return await healthProvider.summary(in: interval, metrics: metrics)
+    }
+
     func setPhotoAttachmentEnabled(_ enabled: Bool) {
         guard enabled else {
             consentStore.update { $0.photoAttachmentEnabled = false }
@@ -245,6 +282,7 @@ final class Tier1ContextController: ObservableObject {
             locationProvider.startBackgroundMonitoring()
             motionProvider.startContinuousUpdates()
             workoutProvider.startBackgroundDelivery()
+            await ContextRequestStore.shared.requestPermissionAndSchedulePending()
         }
     }
 
@@ -262,6 +300,50 @@ final class Tier1ContextController: ObservableObject {
         locationProvider.startBackgroundMonitoring()
         motionProvider.startContinuousUpdates()
         workoutProvider.startBackgroundDelivery()
+    }
+
+    /// Requests HealthKit sleep-analysis read access and starts/stops the background observer accordingly.
+    func setSleepTrackingEnabled(_ enabled: Bool) {
+        guard enabled else {
+            consentStore.update { $0.sleepTrackingEnabled = false }
+            sleepProvider.stopBackgroundDelivery()
+            return
+        }
+
+        Task {
+            let granted = await sleepProvider.requestAccess() == .authorized
+            consentStore.update { $0.sleepTrackingEnabled = granted }
+            guard granted else { return }
+            sleepProvider.startBackgroundDelivery()
+        }
+    }
+
+    /// Re-attaches the sleep observer after a process relaunch; a no-op if the toggle is off.
+    func resumeSleepTrackingIfNeeded() {
+        guard consent.sleepTrackingEnabled else { return }
+        sleepProvider.startBackgroundDelivery()
+    }
+
+    /// Keeps `geofencingEnabled` and CLLocationManager region monitoring in sync with the saved-places list;
+    /// call after the place list changes or on relaunch. Requests Always access on the way from 0 -> 1+ places.
+    func refreshGeofenceMonitoringIfNeeded() {
+        let places = GeofenceStore.shared.places
+        guard !places.isEmpty else {
+            consentStore.update { $0.geofencingEnabled = false }
+            locationProvider.stopMonitoringGeofences()
+            return
+        }
+
+        Task {
+            let always = await locationProvider.requestAlwaysAccess()
+            consentStore.update { $0.geofencingEnabled = always == .authorized }
+            guard always == .authorized else { return }
+            locationProvider.startMonitoringGeofences(places)
+        }
+    }
+
+    func captureCurrentCoordinate() async -> GeoCoordinate? {
+        await locationProvider.captureVisit(around: Date())?.coordinate
     }
 
     func setTimeSemanticsEnabled(_ enabled: Bool) {
@@ -612,6 +694,8 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
     private let manager = CLLocationManager()
     private var continuation: CheckedContinuation<VisitSnapshot?, Never>?
     private var isMonitoringBackground = false
+    private var lastGeofenceTransition: [String: (isEntry: Bool, date: Date)] = [:]
+    private static let geofenceDedupeWindow: TimeInterval = 180
 
     override init() {
         super.init()
@@ -676,6 +760,27 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
         isMonitoringBackground = false
     }
 
+    func startMonitoringGeofences(_ places: [NamedGeofence]) {
+        stopMonitoringGeofences()
+        manager.allowsBackgroundLocationUpdates = true
+        for place in places.prefix(GeofenceStore.maxMonitoredRegions) {
+            let region = CLCircularRegion(
+                center: CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude),
+                radius: max(place.radiusMeters, 50),
+                identifier: place.id.uuidString
+            )
+            region.notifyOnEntry = true
+            region.notifyOnExit = true
+            manager.startMonitoring(for: region)
+        }
+    }
+
+    func stopMonitoringGeofences() {
+        for region in manager.monitoredRegions {
+            manager.stopMonitoring(for: region)
+        }
+    }
+
     func captureVisit(around date: Date) async -> VisitSnapshot? {
         guard authorizationState == .authorized else { return nil }
         manager.requestLocation()
@@ -735,16 +840,7 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
             let latitude = location.coordinate.latitude
             let longitude = location.coordinate.longitude
             Task { @MainActor in
-                let placeName: String
-                if let resolvedName {
-                    placeName = resolvedName
-                } else if let named = NamedPlacesStore.shared.matchingPlace(latitude: latitude, longitude: longitude) {
-                    // Reverse geocoding failed, but the user already named this spot — reuse it.
-                    placeName = named.name
-                } else {
-                    placeName = "Nearby"
-                    NamedPlacesStore.shared.promptToNameIfNeeded(latitude: latitude, longitude: longitude)
-                }
+                let placeName = resolvedName ?? "Nearby"
 
                 await KronikuEventBus.shared.publish(KronikuEvent(
                     timestamp: location.timestamp,
@@ -766,6 +862,32 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
         continuation = nil
     }
 
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        handleGeofenceTransition(region, isEntry: true)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        handleGeofenceTransition(region, isEntry: false)
+    }
+
+    /// CoreLocation can refire the same enter/exit transition; ignore repeats within a short window.
+    private func handleGeofenceTransition(_ region: CLRegion, isEntry: Bool) {
+        let now = Date()
+        if let last = lastGeofenceTransition[region.identifier], last.isEntry == isEntry,
+           now.timeIntervalSince(last.date) < Self.geofenceDedupeWindow {
+            return
+        }
+        lastGeofenceTransition[region.identifier] = (isEntry, now)
+        Task {
+            await KronikuEventBus.shared.publish(KronikuEvent(
+                timestamp: now,
+                type: isEntry ? .geofenceEntered : .geofenceExited,
+                source: "coreLocation",
+                metadata: ["regionId": region.identifier]
+            ))
+        }
+    }
+
     private func waitForAuthorizationChange(from initialStatus: CLAuthorizationStatus, timeoutSeconds: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
@@ -781,6 +903,9 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
 @MainActor
 struct WeatherKitSnapshotProvider: WeatherContextProviding {
     func weather(at date: Date, coordinate: GeoCoordinate) async -> WeatherReading? {
+        if abs(Date().timeIntervalSince(date)) > 90 * 60 {
+            return await openMeteoFallback(at: date, coordinate: coordinate)
+        }
 #if canImport(WeatherKit)
         let weatherService = WeatherService.shared
         let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
@@ -811,7 +936,20 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
             }
         }
 
+        struct Hourly: Decodable {
+            var time: [String]
+            var temperature2m: [Double]
+            var weatherCode: [Int]
+
+            private enum CodingKeys: String, CodingKey {
+                case time
+                case temperature2m = "temperature_2m"
+                case weatherCode = "weather_code"
+            }
+        }
+
         var current: Current?
+        var hourly: Hourly?
     }
 
     private func openMeteoFallback(at date: Date, coordinate: GeoCoordinate) async -> WeatherReading? {
@@ -820,13 +958,26 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
             URLQueryItem(name: "latitude", value: "\(coordinate.latitude)"),
             URLQueryItem(name: "longitude", value: "\(coordinate.longitude)"),
             URLQueryItem(name: "current", value: "temperature_2m,weather_code"),
-            URLQueryItem(name: "timezone", value: "auto")
+            URLQueryItem(name: "hourly", value: "temperature_2m,weather_code"),
+            URLQueryItem(name: "past_days", value: "2"),
+            URLQueryItem(name: "forecast_days", value: "1"),
+            URLQueryItem(name: "timezone", value: "UTC")
         ]
         guard let url = components?.url else { return nil }
 
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoded = try JSONDecoder().decode(OpenMeteoResponse.self, from: data)
+            if let hourly = decoded.hourly,
+               let index = nearestHourlyIndex(to: date, times: hourly.time),
+               hourly.temperature2m.indices.contains(index),
+               hourly.weatherCode.indices.contains(index) {
+                return WeatherReading(
+                    observedAt: date,
+                    condition: openMeteoCondition(for: hourly.weatherCode[index]),
+                    temperatureC: hourly.temperature2m[index]
+                )
+            }
             guard let current = decoded.current else { return nil }
             return WeatherReading(
                 observedAt: date,
@@ -837,6 +988,18 @@ struct WeatherKitSnapshotProvider: WeatherContextProviding {
             print("Open-Meteo fallback failed: \(error)")
             return nil
         }
+    }
+
+    private func nearestHourlyIndex(to date: Date, times: [String]) -> Int? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return times.enumerated().compactMap { index, value -> (Int, TimeInterval)? in
+            guard let parsed = formatter.date(from: value) else { return nil }
+            return (index, abs(parsed.timeIntervalSince(date)))
+        }
+        .min { $0.1 < $1.1 }?.0
     }
 
     private func openMeteoCondition(for code: Int) -> String {
@@ -883,9 +1046,10 @@ final class CoreMotionStateProvider: MotionContextProviding {
     static let shared = CoreMotionStateProvider()
 
     private let manager = CMMotionActivityManager()
+    private let bluetoothProvider = BluetoothAccessoryProvider()
     private let defaults: UserDefaults
-    private static let checkpointKey = "coreMotionLastProcessedAt"
-    private static let stateKey = "coreMotionLastPublishedState"
+    private static let checkpointKey = "coreMotionLastProcessedAtV2"
+    private static let stateKey = "coreMotionLastPublishedStateV2"
     private var lastPublishedState: MotionState?
     private var catchUpTask: Task<Void, Never>?
 
@@ -994,21 +1158,28 @@ final class CoreMotionStateProvider: MotionContextProviding {
             SensorDiagnostics.log("MOTION ignored reason=lowConfidence")
             return
         }
-        guard let state else {
-            SensorDiagnostics.log("MOTION ignored reason=unmapped")
-            return
-        }
+        guard let state else { return }
         guard state != lastPublishedState else {
             SensorDiagnostics.log("MOTION ignored reason=duplicate state=\(state.rawValue)")
             return
         }
         lastPublishedState = state
         defaults.set(state.rawValue, forKey: Self.stateKey)
+        let bluetoothContext: BluetoothContextKind?
+        if origin == "live", Tier1ConsentStore().consent.bluetoothContextEnabled {
+            bluetoothContext = await bluetoothProvider.captureNearbyContext()
+        } else {
+            bluetoothContext = nil
+        }
+        var metadata = ["state": state.rawValue, "origin": origin]
+        if let bluetoothContext {
+            metadata["bluetoothContext"] = bluetoothContext.rawValue
+        }
         await KronikuEventBus.shared.publish(KronikuEvent(
             timestamp: activity.startDate,
             type: .motionChanged,
             source: "coreMotion",
-            metadata: ["state": state.rawValue, "origin": origin]
+            metadata: metadata
         ))
     }
 
@@ -1034,7 +1205,7 @@ final class CoreMotionStateProvider: MotionContextProviding {
         if activity.running { return .running }
         if activity.walking { return .walking }
         if activity.stationary { return .stationary }
-        return nil
+        return .unknown
     }
 
     private func queryMotionState(from start: Date, to end: Date) async throws -> MotionState? {
@@ -1137,43 +1308,61 @@ struct HealthKitSummaryProvider: HealthContextProviding {
 
     func summary(for date: Date, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
 #if canImport(HealthKit)
-        let requestedMetrics = metrics.map(\.rawValue).sorted().joined(separator: ",")
-        SensorDiagnostics.log(
-            "HEALTH summary request date=\(SensorDiagnostics.timestamp(date)) metrics=[\(requestedMetrics)] " +
-            "authorization=\(authorizationState.rawValue)"
-        )
-        guard authorizationState == .authorized else {
-            SensorDiagnostics.log("HEALTH summary ignored reason=unauthorized")
-            return nil
-        }
-        var entries: [HealthSummary.Entry] = []
         let dayInterval = Calendar.current.dateInterval(of: .day, for: date) ?? DateInterval(start: date, end: date.addingTimeInterval(24 * 60 * 60))
-
-        if metrics.contains(.steps), let total = try? await cumulativeSum(for: .stepCount, unit: .count(), in: dayInterval) {
-            entries.append(.init(metric: .steps, value: "\(Int(total.rounded())) steps"))
-        }
-
-        if metrics.contains(.heartRate), let avg = try? await discreteAverage(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), in: dayInterval) {
-            entries.append(.init(metric: .heartRate, value: "\(Int(avg.rounded())) bpm avg"))
-        }
-
-        if metrics.contains(.mindfulMinutes), let total = try? await mindfulMinutes(in: dayInterval) {
-            entries.append(.init(metric: .mindfulMinutes, value: "\(Int(total.rounded())) mindful min"))
-        }
-
-        if metrics.contains(.sleep), let hours = try? await sleepHours(in: dayInterval) {
-            entries.append(.init(metric: .sleep, value: String(format: "%.1f hr sleep", hours)))
-        }
-
-        guard !entries.isEmpty else {
-            SensorDiagnostics.log("HEALTH summary result entries=[]")
-            return nil
-        }
-        let loggedEntries = entries.map { "\($0.metric.rawValue)=\($0.value)" }.joined(separator: ", ")
-        SensorDiagnostics.log("HEALTH summary result entries=[\(loggedEntries)]")
-        return HealthSummary(capturedAt: date, entries: entries)
+        return await summary(in: dayInterval, metrics: metrics)
 #else
         _ = date
+        _ = metrics
+        return nil
+    #endif
+    }
+
+    func summary(in interval: DateInterval, metrics: Set<Tier1HealthMetric>) async -> HealthSummary? {
+#if canImport(HealthKit)
+        let requestedMetrics = metrics.map(\.rawValue).sorted().joined(separator: ",")
+        SensorDiagnostics.log(
+            "HEALTH summary request start=\(SensorDiagnostics.timestamp(interval.start)) end=\(SensorDiagnostics.timestamp(interval.end)) metrics=[\(requestedMetrics)] " +
+            "authorization=\(authorizationState.rawValue)"
+        )
+        // HealthKit hides read authorization status. The caller gates queries on saved user opt-in.
+        var entries: [HealthSummary.Entry] = []
+
+        if metrics.contains(.steps) {
+            do {
+                let total = try await cumulativeSum(for: .stepCount, unit: .count(), in: interval)
+                entries.append(.init(metric: .steps, value: "\(Int(total.rounded())) steps"))
+            } catch {
+                SensorDiagnostics.log("HEALTH steps query failed error=\(error.localizedDescription)")
+            }
+        }
+        if metrics.contains(.heartRate) {
+            do {
+                let avg = try await discreteAverage(for: .heartRate, unit: HKUnit.count().unitDivided(by: .minute()), in: interval)
+                entries.append(.init(metric: .heartRate, value: "\(Int(avg.rounded())) bpm avg"))
+            } catch {
+                SensorDiagnostics.log("HEALTH heartRate query failed error=\(error.localizedDescription)")
+            }
+        }
+        if metrics.contains(.respiratoryRate) {
+            do {
+                let avg = try await discreteAverage(for: .respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), in: interval)
+                entries.append(.init(metric: .respiratoryRate, value: "\(String(format: "%.1f", avg)) breaths/min avg"))
+            } catch {
+                SensorDiagnostics.log("HEALTH respiratoryRate query failed error=\(error.localizedDescription)")
+            }
+        }
+        if metrics.contains(.heartRateVariability) {
+            do {
+                let avg = try await discreteAverage(for: .heartRateVariabilitySDNN, unit: .secondUnit(with: .milli), in: interval)
+                entries.append(.init(metric: .heartRateVariability, value: "\(Int(avg.rounded())) ms avg"))
+            } catch {
+                SensorDiagnostics.log("HEALTH heartRateVariability query failed error=\(error.localizedDescription)")
+            }
+        }
+        guard !entries.isEmpty else { return nil }
+        return HealthSummary(capturedAt: interval.end, entries: entries)
+#else
+        _ = interval
         _ = metrics
         return nil
 #endif
@@ -1186,10 +1375,10 @@ struct HealthKitSummaryProvider: HealthContextProviding {
             return HKObjectType.quantityType(forIdentifier: .stepCount)
         case .heartRate:
             return HKObjectType.quantityType(forIdentifier: .heartRate)
-        case .sleep:
-            return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
-        case .mindfulMinutes:
-            return HKObjectType.categoryType(forIdentifier: .mindfulSession)
+        case .respiratoryRate:
+            return HKObjectType.quantityType(forIdentifier: .respiratoryRate)
+        case .heartRateVariability:
+            return HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
         }
     }
 
@@ -1225,49 +1414,22 @@ struct HealthKitSummaryProvider: HealthContextProviding {
         }
     }
 
-    private func sleepHours(in interval: DateInterval) async throws -> Double {
-        guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return 0 }
-        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                let totalSeconds = (samples as? [HKCategorySample] ?? [])
-                    .filter { $0.value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepCore.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepDeep.rawValue || $0.value == HKCategoryValueSleepAnalysis.asleepREM.rawValue }
-                    .reduce(0.0) { partial, sample in
-                        partial + sample.endDate.timeIntervalSince(sample.startDate)
-                    }
-                continuation.resume(returning: totalSeconds / 3600)
-            }
-            store.execute(query)
-        }
-    }
-
-    private func mindfulMinutes(in interval: DateInterval) async throws -> Double {
-        guard let type = HKObjectType.categoryType(forIdentifier: .mindfulSession) else { return 0 }
-        let predicate = HKQuery.predicateForSamples(withStart: interval.start, end: interval.end)
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                let totalSeconds = (samples as? [HKCategorySample] ?? [])
-                    .reduce(0.0) { partial, sample in
-                        partial + sample.endDate.timeIntervalSince(sample.startDate)
-                    }
-                continuation.resume(returning: totalSeconds / 60)
-            }
-            store.execute(query)
-        }
-    }
-
     private func probeReadAuthorization(for sampleTypes: Set<HKSampleType>) async -> PermissionState {
-        guard let sampleType = sampleTypes.first else { return .notDetermined }
+        guard !sampleTypes.isEmpty else { return .notDetermined }
+
+        // Probe every requested type individually; HealthKit's aggregate authorizationStatus(for:) only
+        // reflects share (write) status, so a per-type read denial must be discovered via a real query.
+        var results: [PermissionState] = []
+        for sampleType in sampleTypes {
+            results.append(await probeReadAuthorization(for: sampleType))
+        }
+        if results.allSatisfy({ $0 == .authorized }) { return .authorized }
+        if results.contains(.denied) { return .denied }
+        if results.contains(.notDetermined) { return .notDetermined }
+        return .restricted
+    }
+
+    private func probeReadAuthorization(for sampleType: HKSampleType) async -> PermissionState {
 
         let end = Date()
         let start = end.addingTimeInterval(-24 * 60 * 60)
@@ -1314,6 +1476,7 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
         var endDate: Date
         var duration: TimeInterval
         var activityName: String
+        var distanceMeters: Double?
     }
 
     private let store = HKHealthStore()
@@ -1323,7 +1486,7 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
     func requestAccess() async -> PermissionState {
         guard HKHealthStore.isHealthDataAvailable() else { return .restricted }
         do {
-            try await store.requestAuthorization(toShare: [], read: [HKObjectType.workoutType()])
+            try await store.requestAuthorization(toShare: [], read: [HKObjectType.workoutType(), HKSeriesType.workoutRoute()])
         } catch {
             print("Workout permission request failed: \(error)")
             return .denied
@@ -1414,16 +1577,25 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
             guard !isDuplicate else { continue }
             publishedWorkoutIDs.insert(workout.id)
             let minutes = Int((workout.duration / 60).rounded())
+            var metadata = [
+                "startedAt": formatter.string(from: workout.startDate),
+                "endedAt": formatter.string(from: workout.endDate),
+                "activityType": workout.activityName,
+                "durationMinutes": "\(minutes)"
+            ]
+            if let distanceMeters = workout.distanceMeters {
+                metadata["distanceMeters"] = "\(distanceMeters)"
+            }
+            if let route = await routeCoordinates(for: workout.id),
+               let routeData = try? JSONEncoder().encode(route),
+               let routeJSON = String(data: routeData, encoding: .utf8) {
+                metadata["routeCoordinates"] = routeJSON
+            }
             await KronikuEventBus.shared.publish(KronikuEvent(
                 timestamp: workout.endDate,
                 type: .workoutEnded,
                 source: "healthKit",
-                metadata: [
-                    "startedAt": formatter.string(from: workout.startDate),
-                    "endedAt": formatter.string(from: workout.endDate),
-                    "activityType": workout.activityName,
-                    "durationMinutes": "\(minutes)"
-                ]
+                metadata: metadata
             ))
         }
     }
@@ -1441,13 +1613,65 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
                         startDate: workout.startDate,
                         endDate: workout.endDate,
                         duration: workout.duration,
-                        activityName: Self.workoutActivityName(for: workout)
+                        activityName: Self.workoutActivityName(for: workout),
+                        distanceMeters: workout.totalDistance?.doubleValue(for: .meter())
                     )
                 }
                 continuation.resume(returning: snapshots)
             }
             store.execute(query)
         }
+    }
+
+    /// Fetches the workout's route as a downsampled coordinate list, since raw GPS traces can hold thousands of points.
+    private func routeCoordinates(for workoutID: UUID) async -> WorkoutRoute? {
+        let predicate = HKQuery.predicateForObject(with: workoutID)
+        guard let workout = await fetchWorkoutObject(matching: predicate) else { return nil }
+
+        let routePredicate = HKQuery.predicateForObjects(from: workout)
+        guard let route = await fetchWorkoutRouteSample(matching: routePredicate) else { return nil }
+
+        var locations: [CLLocation] = []
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let routeQuery = HKWorkoutRouteQuery(route: route) { _, batch, done, error in
+                if let batch, error == nil {
+                    locations.append(contentsOf: batch)
+                }
+                if done || error != nil {
+                    continuation.resume()
+                }
+            }
+            self.store.execute(routeQuery)
+        }
+        guard !locations.isEmpty else { return nil }
+        return WorkoutRoute(coordinates: Self.downsample(locations).map {
+            GeoCoordinate(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
+        })
+    }
+
+    private func fetchWorkoutObject(matching predicate: NSPredicate) async -> HKWorkout? {
+        await withCheckedContinuation { continuation in
+            let query = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate, limit: 1, sortDescriptors: nil) { _, samples, _ in
+                continuation.resume(returning: (samples as? [HKWorkout])?.first)
+            }
+            store.execute(query)
+        }
+    }
+
+    private func fetchWorkoutRouteSample(matching predicate: NSPredicate) async -> HKWorkoutRoute? {
+        await withCheckedContinuation { continuation in
+            let query = HKSampleQuery(sampleType: HKSeriesType.workoutRoute(), predicate: predicate, limit: 1, sortDescriptors: nil) { _, samples, _ in
+                continuation.resume(returning: (samples as? [HKWorkoutRoute])?.first)
+            }
+            store.execute(query)
+        }
+    }
+
+    /// Caps stored route points at 150, evenly spaced, to keep the persisted memory event small.
+    private static func downsample(_ locations: [CLLocation], maxPoints: Int = 150) -> [CLLocation] {
+        guard locations.count > maxPoints else { return locations }
+        let stride = Double(locations.count) / Double(maxPoints)
+        return (0..<maxPoints).map { locations[Int(Double($0) * stride)] }
     }
 
     /// Covers the common Health/Fitness activity types (indoor/outdoor and pool/open-water are
@@ -1508,6 +1732,236 @@ final class HealthKitWorkoutObserver: WorkoutContextProviding {
         case .taiChi: return "Tai Chi"
         case .mindAndBody: return "Mind and Body"
         default: return "Workout"
+        }
+    }
+#else
+    func requestAccess() async -> PermissionState { .restricted }
+    func startBackgroundDelivery() {}
+    func stopBackgroundDelivery() {}
+#endif
+}
+
+/// Observes HealthKit sleep analysis in the background and publishes finalized sleep sessions
+/// (bedtime -> wake time) as `.sleepAnalysisRecorded` events to `KronikuEventBus`.
+@MainActor
+final class HealthKitSleepObserver: SleepContextProviding {
+    static let shared = HealthKitSleepObserver()
+
+#if canImport(HealthKit)
+    private enum SleepStage: Sendable {
+        case inBed
+        case asleep
+        case awake
+    }
+
+    private struct RawSleepSample: Sendable {
+        var start: Date
+        var end: Date
+        var stage: SleepStage
+    }
+
+    private struct SleepSession: Sendable {
+        var key: String
+        var bedTime: Date
+        var wakeTime: Date
+        var asleepSeconds: TimeInterval
+        var inBedSeconds: TimeInterval
+    }
+
+    /// Samples this close together are treated as one continuous sleep session (naps and brief wake-ups included).
+    private static let sessionGapTolerance: TimeInterval = 60 * 60
+    /// A session isn't reported until this long after its last sample, so late-arriving samples can still merge in.
+    private static let finalizationDelay: TimeInterval = 90 * 60
+
+    private let store = HKHealthStore()
+    private var observerQuery: HKObserverQuery?
+    private var publishedSessionKeys: Set<String> = []
+
+    func requestAccess() async -> PermissionState {
+        guard HKHealthStore.isHealthDataAvailable(), let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
+            return .restricted
+        }
+        do {
+            try await store.requestAuthorization(toShare: [], read: [sleepType])
+        } catch {
+            print("Sleep permission request failed: \(error)")
+            return .denied
+        }
+        return await probeSleepReadAuthorization(sleepType: sleepType)
+    }
+
+    private func probeSleepReadAuthorization(sleepType: HKCategoryType) async -> PermissionState {
+        let end = Date()
+        let start = end.addingTimeInterval(-24 * 60 * 60)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HKSample], Error>) in
+                let query = HKSampleQuery(sampleType: sleepType, predicate: predicate, limit: 1, sortDescriptors: nil) { _, samples, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: samples ?? [])
+                    }
+                }
+                store.execute(query)
+            }
+            return .authorized
+        } catch {
+            if let hkError = error as? HKError {
+                switch hkError.code {
+                case .errorAuthorizationDenied:
+                    return .denied
+                case .errorAuthorizationNotDetermined:
+                    return .notDetermined
+                default:
+                    return .restricted
+                }
+            }
+            return .restricted
+        }
+    }
+
+    func startBackgroundDelivery() {
+        guard HKHealthStore.isHealthDataAvailable(),
+              observerQuery == nil,
+              let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return }
+        let query = HKObserverQuery(sampleType: sleepType, predicate: nil) { [weak self] _, completionHandler, error in
+            defer { completionHandler() }
+            guard error == nil else {
+                print("Sleep observer query failed: \(error!)")
+                return
+            }
+            Task { await self?.publishFinalizedSessions(sleepType: sleepType) }
+        }
+        observerQuery = query
+        store.execute(query)
+        Task { await publishFinalizedSessions(sleepType: sleepType) }
+        store.enableBackgroundDelivery(for: sleepType, frequency: .immediate) { success, error in
+            if let error {
+                print("Enabling sleep background delivery failed: \(error)")
+            } else if !success {
+                print("Sleep background delivery could not be enabled.")
+            }
+        }
+    }
+
+    func stopBackgroundDelivery() {
+        if let observerQuery {
+            store.stop(observerQuery)
+        }
+        observerQuery = nil
+        if let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) {
+            store.disableBackgroundDelivery(for: sleepType, withCompletion: { _, _ in })
+        }
+    }
+
+    private func publishFinalizedSessions(sleepType: HKCategoryType) async {
+        let samples = await fetchRecentSleepSamples(sleepType: sleepType)
+        guard !samples.isEmpty else {
+            SensorDiagnostics.log("SLEEP observer result=none")
+            return
+        }
+
+        let now = Date()
+        for session in Self.sessions(from: samples) where !Task.isCancelled {
+            let isFinalized = now.timeIntervalSince(session.wakeTime) >= Self.finalizationDelay
+            let isDuplicate = publishedSessionKeys.contains(session.key)
+            SensorDiagnostics.log(
+                "SLEEP session bedTime=\(SensorDiagnostics.timestamp(session.bedTime)) " +
+                "wakeTime=\(SensorDiagnostics.timestamp(session.wakeTime)) finalized=\(isFinalized) duplicate=\(isDuplicate)"
+            )
+            guard isFinalized, !isDuplicate else { continue }
+            publishedSessionKeys.insert(session.key)
+            let formatter = ISO8601DateFormatter()
+            await KronikuEventBus.shared.publish(KronikuEvent(
+                timestamp: session.wakeTime,
+                type: .sleepAnalysisRecorded,
+                source: "healthKit",
+                metadata: [
+                    "sessionKey": session.key,
+                    "bedTime": formatter.string(from: session.bedTime),
+                    "wakeTime": formatter.string(from: session.wakeTime),
+                    "asleepSeconds": "\(Int(session.asleepSeconds.rounded()))",
+                    "inBedSeconds": "\(Int(session.inBedSeconds.rounded()))"
+                ]
+            ))
+        }
+    }
+
+    /// Merges non-awake samples into per-night sessions (tolerating brief wake-ups mid-night), then aggregates
+    /// asleep vs. in-bed duration across every sample (including awake gaps) within each session's bounds.
+    private static func sessions(from samples: [RawSleepSample]) -> [SleepSession] {
+        let sorted = samples.sorted { $0.start < $1.start }
+        var bounds: [(start: Date, end: Date)] = []
+        var current: (start: Date, end: Date)?
+
+        for sample in sorted where sample.stage != .awake {
+            if let existing = current, sample.start.timeIntervalSince(existing.end) <= sessionGapTolerance {
+                current = (existing.start, max(existing.end, sample.end))
+            } else {
+                if let existing = current { bounds.append(existing) }
+                current = (sample.start, sample.end)
+            }
+        }
+        if let existing = current { bounds.append(existing) }
+
+        return bounds.map { bedTime, wakeTime in
+            var asleepSeconds: TimeInterval = 0
+            var inBedSeconds: TimeInterval = 0
+            var hasExplicitInBed = false
+            for sample in sorted where sample.start < wakeTime && sample.end > bedTime {
+                let clippedStart = max(sample.start, bedTime)
+                let clippedEnd = min(sample.end, wakeTime)
+                guard clippedEnd > clippedStart else { continue }
+                let duration = clippedEnd.timeIntervalSince(clippedStart)
+                switch sample.stage {
+                case .asleep:
+                    asleepSeconds += duration
+                case .inBed:
+                    inBedSeconds += duration
+                    hasExplicitInBed = true
+                case .awake:
+                    break
+                }
+            }
+            if !hasExplicitInBed {
+                inBedSeconds = wakeTime.timeIntervalSince(bedTime)
+            }
+            return SleepSession(
+                key: sessionKey(bedTime, wakeTime),
+                bedTime: bedTime,
+                wakeTime: wakeTime,
+                asleepSeconds: asleepSeconds,
+                inBedSeconds: inBedSeconds
+            )
+        }
+    }
+
+    private static func sessionKey(_ start: Date, _ end: Date) -> String {
+        "\(Int(start.timeIntervalSince1970))-\(Int(end.timeIntervalSince1970))"
+    }
+
+    private func fetchRecentSleepSamples(sleepType: HKCategoryType) async -> [RawSleepSample] {
+        let end = Date()
+        let start = end.addingTimeInterval(-3 * 24 * 60 * 60)
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end)
+        return await withCheckedContinuation { continuation in
+            let sort = [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
+            let query = HKSampleQuery(sampleType: sleepType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: sort) { _, samples, _ in
+                let mapped = (samples as? [HKCategorySample] ?? []).compactMap { sample -> RawSleepSample? in
+                    guard let value = HKCategoryValueSleepAnalysis(rawValue: sample.value) else { return nil }
+                    let stage: SleepStage
+                    switch value {
+                    case .inBed: stage = .inBed
+                    case .awake: stage = .awake
+                    default: stage = .asleep
+                    }
+                    return RawSleepSample(start: sample.startDate, end: sample.endDate, stage: stage)
+                }
+                continuation.resume(returning: mapped)
+            }
+            store.execute(query)
         }
     }
 #else

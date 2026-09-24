@@ -65,9 +65,10 @@ struct ContactMomentDetailView: View {
     private var eventKindTitle: String {
         switch event.source {
         case "workout": return "Workout"
-        case "trip": return event.title?.hasPrefix("Arrived at ") == true ? "Arrival" : "Trip"
+        case "trip": return event.title == "Stop" ? "Stop" : "Trip"
         case "calendar": return "Calendar event"
         case "contactMoment": return "Memory"
+        case "geofence": return event.title ?? "Place"
         default: return "Event"
         }
     }
@@ -78,6 +79,7 @@ struct ContactMomentDetailView: View {
         case "trip": return "Motion and location"
         case "calendar": return "Imported calendar details"
         case "contactMoment": return isEditing ? "Edit" : "Details"
+        case "geofence": return "Saved place"
         default: return "Details"
         }
     }
@@ -124,8 +126,9 @@ struct ContactMomentDetailView: View {
         }
     }
 
-    init(event: MemoryEvent) {
+    init(event: MemoryEvent, startsInEditMode: Bool = false) {
         self.event = event
+        _isEditing = State(initialValue: startsInEditMode)
         // initialize states from linked contact moment if available
         if let cm = event.contactMoment {
             let names = cm.contactNames.isEmpty ? [cm.personName].compactMap { $0 } : cm.contactNames
@@ -442,6 +445,10 @@ struct ContactMomentDetailView: View {
                 detailRow(title: "Note", value: note)
             }
 
+            if let route = event.workoutRoute, !route.coordinates.isEmpty {
+                WorkoutRouteMapView(coordinates: route.coordinates)
+            }
+
             contextSummary
 
             if !linkedEvents.isEmpty {
@@ -567,7 +574,7 @@ struct ContactMomentDetailView: View {
 
     private var systemEventDetailLabel: String {
         if event.source == "workout" { return "Duration" }
-        if event.source == "trip", event.title?.hasPrefix("Arrived at ") == true { return "Stop duration" }
+        if event.source == "trip", event.title == "Stop" { return "Location and duration" }
         if event.source == "trip" { return "Route" }
         return "Details"
     }
@@ -857,6 +864,7 @@ struct ContactMomentDetailView: View {
         case "driving": return "car"
         case "cycling": return "bicycle"
         case "stationary": return "figure.stand"
+        case "unknown": return "questionmark.circle"
         default: return "figure.walk"
         }
     }
@@ -1212,5 +1220,35 @@ struct ContactMomentDetailView: View {
             }
         }
         photoAttachments = newAttachments
+    }
+}
+
+import MapKit
+
+private struct WorkoutRouteMapView: View {
+    let coordinates: [GeoCoordinate]
+
+    private var region: MKCoordinateRegion {
+        let lats = coordinates.map(\.latitude)
+        let lons = coordinates.map(\.longitude)
+        let center = CLLocationCoordinate2D(
+            latitude: (lats.min()! + lats.max()!) / 2,
+            longitude: (lons.min()! + lons.max()!) / 2
+        )
+        let span = MKCoordinateSpan(
+            latitudeDelta: max(0.005, (lats.max()! - lats.min()!) * 1.4),
+            longitudeDelta: max(0.005, (lons.max()! - lons.min()!) * 1.4)
+        )
+        return MKCoordinateRegion(center: center, span: span)
+    }
+
+    var body: some View {
+        Map(initialPosition: .region(region)) {
+            MapPolyline(coordinates: coordinates.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) })
+                .stroke(KronikuPalette.ember, lineWidth: 3)
+        }
+        .frame(height: 160)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .allowsHitTesting(false)
     }
 }

@@ -4,8 +4,8 @@ import SwiftData
 enum Tier1HealthMetric: String, Codable, Hashable, CaseIterable, Identifiable {
     case steps
     case heartRate
-    case sleep
-    case mindfulMinutes
+    case respiratoryRate
+    case heartRateVariability
 
     var id: String { rawValue }
 
@@ -15,10 +15,10 @@ enum Tier1HealthMetric: String, Codable, Hashable, CaseIterable, Identifiable {
             return "Steps"
         case .heartRate:
             return "Heart rate"
-        case .sleep:
-            return "Sleep"
-        case .mindfulMinutes:
-            return "Mindful minutes"
+        case .respiratoryRate:
+            return "Respiratory rate"
+        case .heartRateVariability:
+            return "Heart rate variability"
         }
     }
 }
@@ -134,6 +134,7 @@ enum MotionState: String, Codable, Hashable {
     case running
     case cycling
     case stationary
+    case unknown
 }
 
 enum BluetoothContextKind: String, Codable, Hashable {
@@ -171,6 +172,14 @@ struct VisitSnapshot: Codable, Hashable {
     var capturedAt: Date
 }
 
+struct NamedGeofence: Codable, Hashable, Identifiable {
+    var id: UUID = UUID()
+    var name: String
+    var latitude: Double
+    var longitude: Double
+    var radiusMeters: Double = 150
+}
+
 struct DerivedEventDraft: Hashable {
     var source: String
     var title: String
@@ -178,8 +187,15 @@ struct DerivedEventDraft: Hashable {
     var occurredAt: Date
     var endedAt: Date
     var motion: MotionState?
+    var bluetoothContext: BluetoothContextKind?
     var place: VisitSnapshot?
     var confidenceScore: Double?
+    var distanceMeters: Double?
+    var route: WorkoutRoute?
+}
+
+struct WorkoutRoute: Codable, Hashable {
+    var coordinates: [GeoCoordinate]
 }
 
 struct WeatherReading: Codable, Hashable {
@@ -236,8 +252,12 @@ struct Tier1ConsentState: Codable, Hashable {
     var noteIngestionEnabled: Bool = false
     var contactsResolutionEnabled: Bool = false
     var bluetoothContextEnabled: Bool = false
+    // Enter/exit monitoring for user-saved places (Home, Office, etc.); requires Always location access.
+    var geofencingEnabled: Bool = false
     // Always-on background significant-location-change/motion/HealthKit-workout monitoring; off by default.
     var backgroundTripDetectionEnabled: Bool = false
+    // Background HealthKit sleep-analysis observation, surfaced as "Went to bed"/"Woke up" memories.
+    var sleepTrackingEnabled: Bool = false
     var hasCompletedOnboarding: Bool = false
     var needsOnboardingResume: Bool = false
     var onboardingPage: Int = 0
@@ -309,10 +329,13 @@ final class MemoryEvent: Identifiable {
     var place: Place?
     var weatherSnapshot: WeatherSnapshot?
     var healthSummary: HealthSummary?
+    // Populated for workouts (HealthKit) and driving trips (coarse, from significant-location-change points).
+    var distanceMeters: Double?
+    var workoutRoute: WorkoutRoute?
     var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false, calendarSyncEligible: Bool = false) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, distanceMeters: Double? = nil, workoutRoute: WorkoutRoute? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false, calendarSyncEligible: Bool = false) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.calendarSyncEligible = calendarSyncEligible
@@ -327,6 +350,8 @@ final class MemoryEvent: Identifiable {
         self.place = place
         self.weatherSnapshot = weatherSnapshot
         self.healthSummary = healthSummary
+        self.distanceMeters = distanceMeters
+        self.workoutRoute = workoutRoute
         self.extractionReview = extractionReview
         self.photoAttachments = photoAttachments
         self.linkedEventIDs = linkedEventIDs

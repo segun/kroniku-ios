@@ -366,8 +366,8 @@ struct MemoryView: View {
             title: result.title,
             detail: result.detail,
             context: result.searchText,
-            symbolName: Self.defaultSymbolName(for: result.source),
-            colorName: Self.defaultColorName(for: result.source),
+            symbolName: Self.defaultSymbolName(for: result.source, title: result.title),
+            colorName: Self.defaultColorName(for: result.source, title: result.title),
             backendEventId: result.eventId,
             syncedToBackendAt: result.updatedAt,
             payloadHash: result.payloadHash,
@@ -378,11 +378,13 @@ struct MemoryView: View {
         return event
     }
 
-    private static func defaultSymbolName(for source: String) -> String {
+    private static func defaultSymbolName(for source: String, title: String?) -> String {
         switch source {
         case "calendar": return "calendar"
         case "trip": return "car.fill"
         case "workout": return "figure.run"
+        case "geofence": return "mappin.circle"
+        case "sleep": return title == "Woke up" ? "sun.max.fill" : "moon.stars.fill"
         case "coreLocation": return "mappin.and.ellipse"
         case "coreMotion": return "figure.walk"
         case "healthKit": return "heart.text.square"
@@ -390,10 +392,12 @@ struct MemoryView: View {
         }
     }
 
-    private static func defaultColorName(for source: String) -> String {
+    private static func defaultColorName(for source: String, title: String?) -> String {
         switch source {
         case "calendar": return "orange"
         case "trip", "workout": return "pink"
+        case "geofence": return "indigo"
+        case "sleep": return title == "Woke up" ? "orange" : "indigo"
         default: return "indigo"
         }
     }

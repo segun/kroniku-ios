@@ -2,7 +2,8 @@ import SwiftUI
 import SwiftData
 
 extension Notification.Name {
-    static let tripStopContextRequested = Notification.Name("tripStopContextRequested")
+    static let contextRequestOpened = Notification.Name("contextRequestOpened")
+    static let openPlacesSettingsRequested = Notification.Name("openPlacesSettingsRequested")
 }
 
 struct RootTabView: View {
@@ -11,10 +12,10 @@ struct RootTabView: View {
     @State private var selectedTab: Tab = .timeline
     @State private var showsCapture = false
     @State private var showsTier1Onboarding = false
-    @State private var pendingPlaceCoordinate: GeoCoordinate?
     @State private var captureLinkedEventIDs: Set<UUID> = []
     @StateObject private var contextController = Tier1ContextController()
     @StateObject private var tier2Controller = Tier2ContextController()
+    @StateObject private var contextRequestStore = ContextRequestStore.shared
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -25,6 +26,11 @@ struct RootTabView: View {
             MemoryView()
                 .tabItem { Label("Memory", systemImage: "sparkles") }
                 .tag(Tab.memory)
+
+            ContextRequestsView(store: contextRequestStore)
+                .tabItem { Label("Inbox", systemImage: "bell") }
+                .badge(contextRequestStore.unreadCount)
+                .tag(Tab.inbox)
 
             SettingsView(
                 showsTier1Onboarding: $showsTier1Onboarding,
@@ -48,19 +54,21 @@ struct RootTabView: View {
                 .environmentObject(contextController)
                 .environmentObject(tier2Controller)
         }
-        .sheet(item: $pendingPlaceCoordinate) { coordinate in
-            NamePlaceView(coordinate: coordinate)
-        }
         .onAppear {
             guard AuthService.shared.isAuthenticated else { return }
             if !contextController.consent.hasCompletedOnboarding && !contextController.consent.needsOnboardingResume {
                 showsTier1Onboarding = true
             }
             contextController.resumeBackgroundMonitoringIfNeeded()
+            contextController.refreshGeofenceMonitoringIfNeeded()
+            contextController.resumeSleepTrackingIfNeeded()
+            openPendingContextRequestIfNeeded()
             Task {
                 await contextController.pushDayPeriodsIfNeeded()
                 await contextController.pullDayPeriodsIfNeeded()
-                await NamedPlacesStore.shared.refresh()
+                if contextController.consent.backgroundTripDetectionEnabled {
+                    await contextRequestStore.requestPermissionAndSchedulePending()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryRepositoryChanged)) { _ in
@@ -69,15 +77,14 @@ struct RootTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .authSessionExpired)) { _ in
             handleExpiredSession()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .namePlaceRequested)) { note in
-            guard let latitude = note.userInfo?["latitude"] as? Double, let longitude = note.userInfo?["longitude"] as? Double else { return }
-            pendingPlaceCoordinate = GeoCoordinate(latitude: latitude, longitude: longitude)
+        .onReceive(NotificationCenter.default.publisher(for: .contextRequestOpened)) { note in
+            guard let requestID = note.userInfo?["requestID"] as? UUID else { return }
+            UserDefaults.standard.removeObject(forKey: "pendingContextRequestID")
+            contextRequestStore.queueOpen(requestID)
+            selectedTab = .inbox
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tripStopContextRequested)) { note in
-            guard let eventID = note.userInfo?["eventID"] as? UUID else { return }
-            captureLinkedEventIDs = [eventID]
-            selectedTab = .timeline
-            showsCapture = true
+        .onReceive(NotificationCenter.default.publisher(for: .openPlacesSettingsRequested)) { _ in
+            selectedTab = .settings
         }
         .preferredColorScheme(.light)
     }
@@ -92,6 +99,14 @@ struct RootTabView: View {
         Task { try? await coordinator.pushPending() }
     }
 
+    private func openPendingContextRequestIfNeeded() {
+        guard let rawID = UserDefaults.standard.string(forKey: "pendingContextRequestID"),
+              let requestID = UUID(uuidString: rawID) else { return }
+        UserDefaults.standard.removeObject(forKey: "pendingContextRequestID")
+          contextRequestStore.queueOpen(requestID)
+        selectedTab = .inbox
+    }
+
     private func handleExpiredSession() {
         try? AuthService.shared.logout()
         isAuthenticated = false
@@ -99,5 +114,5 @@ struct RootTabView: View {
 }
 
 private enum Tab: Hashable {
-    case timeline, memory, settings
+    case timeline, memory, inbox, settings
 }
