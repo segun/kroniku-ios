@@ -66,6 +66,8 @@ struct RootTabView: View {
             Task {
                 await contextController.pushDayPeriodsIfNeeded()
                 await contextController.pullDayPeriodsIfNeeded()
+                await GeofenceStore.shared.refresh()
+                contextController.refreshGeofenceMonitoringIfNeeded()
                 if contextController.consent.backgroundTripDetectionEnabled {
                     await contextRequestStore.requestPermissionAndSchedulePending()
                 }

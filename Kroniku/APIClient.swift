@@ -4,7 +4,7 @@ extension Notification.Name {
     static let authSessionExpired = Notification.Name("authSessionExpired")
 }
 
-/// Centralized HTTP client with JWT handling, error parsing, and request/response logging
+/// Centralized HTTP client with JWT handling and error parsing.
 final class APIClient: @unchecked Sendable {
     static let shared = APIClient()
 
@@ -74,6 +74,16 @@ final class APIClient: @unchecked Sendable {
         let _: EmptyResponse = try await patch(path, body: body)
     }
 
+    /// Performs a PUT request with an Encodable body
+    func put<T: Decodable, U: Encodable>(_ path: String, body: U) async throws -> T {
+        try await request(path: path, method: "PUT", body: try encoder.encode(body))
+    }
+
+    /// Performs a PUT request without a response body
+    func put<U: Encodable>(_ path: String, body: U) async throws {
+        let _: EmptyResponse = try await put(path, body: body)
+    }
+
     /// Performs a DELETE request
     func delete<T: Decodable>(_ path: String) async throws -> T {
         try await request(path: path, method: "DELETE", body: nil)
@@ -112,8 +122,6 @@ final class APIClient: @unchecked Sendable {
         // Encode body if present
         urlRequest.httpBody = body
 
-        logRequest(urlRequest)
-
         let data: Data
         let urlResponse: URLResponse
         do {
@@ -132,8 +140,6 @@ final class APIClient: @unchecked Sendable {
         guard let httpResponse = urlResponse as? HTTPURLResponse else {
             throw HTTPError.unknownError(message: "Invalid response type")
         }
-
-        logResponse(httpResponse, data: data)
 
         try handleHTTPStatus(httpResponse.statusCode, data: data)
 
@@ -182,29 +188,6 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
-    private func logRequest(_ request: URLRequest) {
-        let method = request.httpMethod ?? "GET"
-        let url = request.url?.absoluteString ?? "unknown"
-        let hasAuth = request.value(forHTTPHeaderField: "Authorization") != nil
-        
-        print("📤 [\(method)] \(url) \(hasAuth ? "[Auth]" : "")")
-        
-        if let body = request.httpBody, let json = try? JSONSerialization.jsonObject(with: body) {
-            print("   Body: \(json)")
-        }
-    }
-
-    private func logResponse(_ response: HTTPURLResponse, data: Data) {
-        let status = response.statusCode
-        let url = response.url?.absoluteString ?? "unknown"
-        let statusEmoji = (200..<300).contains(status) ? "✅" : "❌"
-        
-        print("📥 [\(statusEmoji) \(status)] \(url)")
-        
-        if !data.isEmpty, let json = try? JSONSerialization.jsonObject(with: data) {
-            print("   Response: \(json)")
-        }
-    }
 }
 
 // MARK: - Empty Response

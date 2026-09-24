@@ -772,6 +772,11 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
             region.notifyOnEntry = true
             region.notifyOnExit = true
             manager.startMonitoring(for: region)
+            SensorDiagnostics.log(
+                "GEOFENCE monitoring registered title=Arrived/Left \(place.name) " +
+                    "regionId=\(region.identifier) radiusMeters=\(region.radius)"
+            )
+            manager.requestState(for: region)
         }
     }
 
@@ -870,9 +875,33 @@ final class CoreLocationVisitProvider: NSObject, LocationContextProviding, @prec
         handleGeofenceTransition(region, isEntry: false)
     }
 
+    func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        let stateName: String
+        switch state {
+        case .inside: stateName = "inside"
+        case .outside: stateName = "outside"
+        case .unknown: stateName = "unknown"
+        @unknown default: stateName = "unknown"
+        }
+        SensorDiagnostics.log(
+            "GEOFENCE OS state state=\(stateName) regionId=\(region.identifier) " +
+                "timestamp=\(SensorDiagnostics.timestamp(Date()))"
+        )
+    }
+
     /// CoreLocation can refire the same enter/exit transition; ignore repeats within a short window.
     private func handleGeofenceTransition(_ region: CLRegion, isEntry: Bool) {
         let now = Date()
+        let transitionTitle: String
+        if let place = GeofenceStore.shared.place(forRegionId: region.identifier) {
+            transitionTitle = isEntry ? "Arrived \(place.name)" : "Left \(place.name)"
+        } else {
+            transitionTitle = isEntry ? "Arrived (unknown place)" : "Left (unknown place)"
+        }
+        SensorDiagnostics.log(
+            "GEOFENCE OS received title=\(transitionTitle) regionId=\(region.identifier) " +
+                "timestamp=\(SensorDiagnostics.timestamp(now))"
+        )
         if let last = lastGeofenceTransition[region.identifier], last.isEntry == isEntry,
            now.timeIntervalSince(last.date) < Self.geofenceDedupeWindow {
             return

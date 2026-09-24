@@ -715,6 +715,39 @@ final class TripCorrelator {
               let regionId = event.metadata["regionId"],
               let place = GeofenceStore.shared.place(forRegionId: regionId) else { return }
         let isEntry = event.type == .geofenceEntered
+
+        let recentEvents = repository.fetchAll()
+            .filter {
+                $0.source == "geofence" &&
+                    ($0.title == "Arrived \(place.name)" || $0.title == "Left \(place.name)") &&
+                    !$0.isDeleted
+            }
+            .sorted { ($0.occurredAt ?? .distantPast) > ($1.occurredAt ?? .distantPast) }
+
+        // A weak GPS fix can bounce across a region boundary. Keep the first departure,
+        // but replace a noisy arrival/departure with the latest transition instead of
+        // recording every boundary crossing as a separate memory.
+        if let recent = recentEvents.first,
+           let occurredAt = recent.occurredAt,
+           event.timestamp.timeIntervalSince(occurredAt) < 30 * 60 {
+            if isEntry && recent.title == "Arrived \(place.name)" {
+                do {
+                    recent.occurredAt = event.timestamp
+                    recent.derivedEndedAt = event.timestamp
+                    recent.place = Place(name: place.name, latitude: place.latitude, longitude: place.longitude)
+                    recent.updatedAt = Date()
+                    recent.backendVersion = max(1, recent.backendVersion + 1)
+                    recent.syncedToBackendAt = nil
+                    try repository.update(event: recent)
+                } catch {
+                    SensorDiagnostics.log("RECONCILER geofence updateFailed error=\(error.localizedDescription)")
+                }
+            }
+            // Ignore both repeated callbacks and opposite-direction callbacks inside
+            // the same boundary-jitter window. The next stable transition starts a new trip.
+            return
+        }
+
         do {
             _ = try repository.addDerivedEvent(
                 source: "geofence",

@@ -676,7 +676,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
                 }
             )
         }
-        event.includeHealthData = contextData.includeHealthData ?? (event.source == "workout" || event.source == "sleep")
+        event.includeHealthData = (event.source == "workout" || event.source == "sleep")
+            ? true
+            : (contextData.includeHealthData ?? false)
         event.distanceMeters = contextData.distanceMeters
         event.workoutRoute = contextData.workoutRoute.map { route in
             WorkoutRoute(coordinates: route.coordinates.map { GeoCoordinate(latitude: $0.latitude, longitude: $0.longitude) })

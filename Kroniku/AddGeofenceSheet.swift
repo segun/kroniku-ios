@@ -116,7 +116,7 @@ struct AddGeofenceSheet: View {
         isAddressFieldFocused = false
         Task {
             isResolvingAddress = true
-            coordinate = await Self.geocode(addressText)
+            coordinate = await Self.search(addressText, near: coordinate)
             isResolvingAddress = false
             if coordinate == nil {
                 showToast("Can't find address")
@@ -134,15 +134,23 @@ struct AddGeofenceSheet: View {
         }
     }
 
-    private static func geocode(_ address: String) async -> GeoCoordinate? {
-        await withCheckedContinuation { continuation in
-            CLGeocoder().geocodeAddressString(address) { placemarks, _ in
-                guard let coordinate = placemarks?.first?.location?.coordinate else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: GeoCoordinate(latitude: coordinate.latitude, longitude: coordinate.longitude))
-            }
+    /// Uses MKLocalSearch (natural-language, POI/address aware) instead of CLGeocoder, which only matches
+    /// well-formed postal addresses and can't find business names or informal addresses like Maps can.
+    private static func search(_ query: String, near coordinate: GeoCoordinate?) async -> GeoCoordinate? {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        if let coordinate {
+            request.region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: coordinate.latitude, longitude: coordinate.longitude),
+                span: MKCoordinateSpan(latitudeDelta: 5, longitudeDelta: 5)
+            )
+        }
+        do {
+            let response = try await MKLocalSearch(request: request).start()
+            guard let resultCoordinate = response.mapItems.first?.placemark.coordinate else { return nil }
+            return GeoCoordinate(latitude: resultCoordinate.latitude, longitude: resultCoordinate.longitude)
+        } catch {
+            return nil
         }
     }
 }

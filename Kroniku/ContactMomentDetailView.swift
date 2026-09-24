@@ -51,7 +51,7 @@ struct ContactMomentDetailView: View {
     private var detailMetadata: [ContextCard.MetadataEntry] {
         let metadata = event.contextCard?.metadata ?? []
         return metadata.filter { entry in
-            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit" || entry.key == "contacts" || entry.key == "userNote" || entry.key == "endedAt")
+            !(entry.key == "interactionType" || entry.key == "captureMethod" || entry.key == "visit" || entry.key == "contacts" || entry.key == "userNote" || entry.key == "endedAt" || entry.key == "includeHealthData")
         }
     }
 

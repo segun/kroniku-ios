@@ -11,10 +11,12 @@ final class GeofenceStore: ObservableObject {
 
     @Published private(set) var places: [NamedGeofence] = []
 
+    private let service: GeofenceService
     private let defaults: UserDefaults
     private let key = "namedGeofencesV1"
 
-    init(defaults: UserDefaults = .standard) {
+    init(service: GeofenceService = .shared, defaults: UserDefaults = .standard) {
+        self.service = service
         self.defaults = defaults
         self.places = Self.load(defaults: defaults, key: key)
     }
@@ -22,15 +24,40 @@ final class GeofenceStore: ObservableObject {
     func add(_ place: NamedGeofence) {
         places.append(place)
         persist()
+        Task {
+            do {
+                _ = try await service.upsert(place)
+            } catch {
+                print("Geofence sync (create) failed: \(error)")
+            }
+        }
     }
 
     func remove(_ id: UUID) {
         places.removeAll { $0.id == id }
         persist()
+        Task {
+            do {
+                try await service.delete(id: id)
+            } catch {
+                print("Geofence sync (delete) failed: \(error)")
+            }
+        }
     }
 
     func place(forRegionId regionId: String) -> NamedGeofence? {
         places.first { $0.id.uuidString == regionId }
+    }
+
+    /// Replaces the local cache with the backend's list; safe to call repeatedly (e.g. on app launch).
+    func refresh() async {
+        do {
+            let fetched = try await service.list()
+            places = fetched
+            persist()
+        } catch {
+            print("Geofences refresh failed: \(error)")
+        }
     }
 
     private func persist() {
