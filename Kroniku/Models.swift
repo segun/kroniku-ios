@@ -192,6 +192,7 @@ struct DerivedEventDraft: Hashable {
     var confidenceScore: Double?
     var distanceMeters: Double?
     var route: WorkoutRoute?
+    var mediaNowPlaying: MediaNowPlaying?
 }
 
 struct WorkoutRoute: Codable, Hashable {
@@ -329,13 +330,14 @@ final class MemoryEvent: Identifiable {
     var place: Place?
     var weatherSnapshot: WeatherSnapshot?
     var healthSummary: HealthSummary?
+    var includeHealthData: Bool = false
     // Populated for workouts (HealthKit) and driving trips (coarse, from significant-location-change points).
     var distanceMeters: Double?
     var workoutRoute: WorkoutRoute?
     var extractionReview: Tier2ExtractionReview?
     var photoAttachments: [PhotoAttachment]
 
-    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, distanceMeters: Double? = nil, workoutRoute: WorkoutRoute? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false, calendarSyncEligible: Bool = false) {
+    init(externalSourceID: String? = nil, isReadOnlySource: Bool = false, occurredAt: Date? = Date(), source: String? = nil, title: String? = nil, detail: String? = nil, context: String? = nil, contextCard: ContextCard? = nil, symbolName: String? = nil, colorName: String? = nil, place: Place? = nil, weatherSnapshot: WeatherSnapshot? = nil, healthSummary: HealthSummary? = nil, includeHealthData: Bool = false, distanceMeters: Double? = nil, workoutRoute: WorkoutRoute? = nil, extractionReview: Tier2ExtractionReview? = nil, photoAttachments: [PhotoAttachment] = [], linkedEventIDs: [UUID] = [], confidenceScore: Double? = nil, derivedEndedAt: Date? = nil, backendEventId: String? = nil, backendVersion: Int = 0, syncedToBackendAt: Date? = nil, payloadHash: String? = nil, encryptedPayload: String? = nil, isDeleted: Bool = false, calendarSyncEligible: Bool = false) {
         self.externalSourceID = externalSourceID
         self.isReadOnlySource = isReadOnlySource
         self.calendarSyncEligible = calendarSyncEligible
@@ -350,6 +352,7 @@ final class MemoryEvent: Identifiable {
         self.place = place
         self.weatherSnapshot = weatherSnapshot
         self.healthSummary = healthSummary
+        self.includeHealthData = includeHealthData
         self.distanceMeters = distanceMeters
         self.workoutRoute = workoutRoute
         self.extractionReview = extractionReview

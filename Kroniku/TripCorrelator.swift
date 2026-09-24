@@ -42,10 +42,16 @@ private struct WorkoutObservation: Codable, Hashable {
     var route: WorkoutRoute?
 }
 
+private struct MediaObservation: Codable, Hashable {
+    var timestamp: Date
+    var media: MediaNowPlaying
+}
+
 private struct CorrelationObservationStore: Codable {
     var motion: [MotionObservation] = []
     var locations: [VisitSnapshot] = []
     var workouts: [WorkoutObservation] = []
+    var media: [MediaObservation] = []
 }
 
 /// Retains normalized sensor observations and repeatedly reduces them into one canonical,
@@ -123,6 +129,11 @@ final class TripCorrelator {
         SensorDiagnostics.log(
             "RECONCILER receive type=\(event.type.rawValue) timestamp=\(SensorDiagnostics.timestamp(event.timestamp))"
         )
+
+        if let media = MediaNowPlayingProvider.current() {
+            observations.media.removeAll { $0.timestamp == event.timestamp }
+            observations.media.append(MediaObservation(timestamp: event.timestamp, media: media))
+        }
 
         switch event.type {
         case .locationSignificantChange:
@@ -207,6 +218,7 @@ final class TripCorrelator {
             SensorDiagnostics.log(
                 "RECONCILER applied observations motion=\(observations.motion.count) " +
                     "locations=\(observations.locations.count) workouts=\(observations.workouts.count) " +
+                    "media=\(observations.media.count) " +
                     "derived=\(drafts.count)"
             )
                     enqueueContextRequests(for: stopDrafts)
@@ -241,7 +253,7 @@ final class TripCorrelator {
         let metrics = consentStore.consent.healthConsent.enabledMetrics
         guard consentStore.consent.healthAuthorizationState == .authorized, !metrics.isEmpty else { return }
         let candidates = repository.fetchAll().filter {
-            $0.source == "workout" && $0.healthSummary == nil && !$0.isDeleted
+            $0.includeHealthData && $0.source == "workout" && $0.healthSummary == nil && !$0.isDeleted
         }
 
         for event in candidates where !Task.isCancelled {
@@ -261,7 +273,7 @@ final class TripCorrelator {
         guard consentStore.consent.healthAuthorizationState == .authorized, !metrics.isEmpty else { return }
         let sleepEvents = repository.fetchAll().filter { $0.source == "sleep" && !$0.isDeleted }
         let bedtimes = sleepEvents.filter { $0.title == "Went to bed" }.compactMap(\.occurredAt).sorted()
-        let candidates = sleepEvents.filter { $0.title == "Woke up" && $0.healthSummary == nil }
+        let candidates = sleepEvents.filter { $0.includeHealthData && $0.title == "Woke up" && $0.healthSummary == nil }
 
         for event in candidates where !Task.isCancelled {
             guard let wakeTime = event.occurredAt,
@@ -470,7 +482,8 @@ final class TripCorrelator {
             place: locations(in: interval).last,
             confidenceScore: 1,
             distanceMeters: workout.distanceMeters,
-            route: workout.route
+            route: workout.route,
+            mediaNowPlaying: media(in: interval)
         )
     }
 
@@ -565,7 +578,8 @@ final class TripCorrelator {
             place: locations.first,
             confidenceScore: category == .driving ? 0.8 : 0.7,
             distanceMeters: distanceMeters,
-            route: route
+            route: route,
+            mediaNowPlaying: media(in: interval)
         )
     }
 
@@ -600,7 +614,8 @@ final class TripCorrelator {
                 motion: .stationary,
                 bluetoothContext: nil,
                 place: place,
-                confidenceScore: 0.8
+                confidenceScore: 0.8,
+                mediaNowPlaying: media(in: DateInterval(start: previous.endedAt, end: next.occurredAt))
             )
         }
     }
@@ -627,6 +642,18 @@ final class TripCorrelator {
         observations.locations
             .filter { interval.contains($0.capturedAt) }
             .sorted { $0.capturedAt < $1.capturedAt }
+    }
+
+    private func media(in interval: DateInterval) -> MediaNowPlaying? {
+        let tolerance: TimeInterval = 2 * 60
+        return observations.media
+            .filter {
+                $0.timestamp >= interval.start.addingTimeInterval(-tolerance) &&
+                    $0.timestamp <= interval.end.addingTimeInterval(tolerance)
+            }
+            .min { lhs, rhs in
+                abs(lhs.timestamp.timeIntervalSince(interval.start)) < abs(rhs.timestamp.timeIntervalSince(interval.start))
+            }?.media
     }
 
     private func locationsSupporting(_ interval: DateInterval) -> [VisitSnapshot] {
@@ -779,6 +806,7 @@ final class TripCorrelator {
 
             let wakeEvent: MemoryEvent
             if let existingWake {
+                existingWake.includeHealthData = true
                 // Backfills an older duplicate/relaunch's sparse record (created before detail/health enrichment
                 // existed, or before health consent was granted) rather than leaving it stuck bare forever.
                 guard existingWake.detail == nil || (healthEnrichmentEligible && existingWake.healthSummary == nil) else { return }

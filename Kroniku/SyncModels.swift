@@ -34,6 +34,13 @@ struct SyncWorkoutRouteData: Codable, Equatable {
     let coordinates: [SyncGeoCoordinateData]
 }
 
+struct SyncMediaNowPlayingData: Codable, Equatable {
+    let title: String
+    let artist: String?
+    let albumTitle: String?
+    let source: String?
+}
+
 struct SyncEventContextData: Codable, Equatable {
     let place: SyncPlaceData?
     let weather: SyncWeatherData?
@@ -44,9 +51,11 @@ struct SyncEventContextData: Codable, Equatable {
     let contacts: [String]?
     let userNote: String?
     let endedAt: Date?
+    let includeHealthData: Bool?
     let healthSummary: [SyncHealthEntryData]?
     let distanceMeters: Double?
     let workoutRoute: SyncWorkoutRouteData?
+    let mediaNowPlaying: SyncMediaNowPlayingData?
     // Stable EventKit identifier for calendar-sourced events; lets other devices reconcile the same occurrence.
     let externalSourceID: String?
 
@@ -54,8 +63,8 @@ struct SyncEventContextData: Codable, Equatable {
         place == nil && weather == nil && motion == nil && bluetoothContext == nil &&
         (timeSemantics?.isEmpty ?? true) && (photoReferences?.isEmpty ?? true) &&
         (contacts?.isEmpty ?? true) && (userNote?.isEmpty ?? true) && endedAt == nil &&
-        (healthSummary?.isEmpty ?? true) && distanceMeters == nil && workoutRoute == nil &&
-        externalSourceID == nil
+        (healthSummary?.isEmpty ?? true) && includeHealthData == nil && distanceMeters == nil && workoutRoute == nil &&
+        externalSourceID == nil && mediaNowPlaying == nil
     }
 }
 

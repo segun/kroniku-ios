@@ -36,6 +36,7 @@ struct ContactMomentCaptureView: View {
     @State private var startTime = Date()
     @State private var endTime: Date?
     @State private var hasEndTime = false
+    @State private var includeHealthData = false
     // Kept mounted at all times so the DatePicker is never destroyed/recreated, which crashes on some iOS versions.
     @State private var endTimeDraft = Date()
     @State private var saveErrorMessage: String?
@@ -202,6 +203,10 @@ struct ContactMomentCaptureView: View {
                                         }
                                     }
                                 }
+
+                                Toggle("Include health data", isOn: $includeHealthData)
+                                    .font(.subheadline)
+                                    .tint(KronikuPalette.ink)
 
                                 if contextController.consent.noteIngestionEnabled {
                                     formField(title: "Shared note") {
@@ -518,7 +523,7 @@ struct ContactMomentCaptureView: View {
 
         let repo = SwiftDataMemoryRepository(modelContext: modelContext)
         do {
-            let enrichment = await contextController.buildEnrichment(for: startTime)
+            let enrichment = await contextController.buildEnrichment(for: startTime, includeHealthData: includeHealthData)
             try repo.addContactMoment(
                 personName: nil,
                 interactionType: interaction.rawValue,
@@ -533,7 +538,8 @@ struct ContactMomentCaptureView: View {
                 linkedEventIDs: Array(linkedEventIDs),
                 contactNames: contactNames,
                 resolvedContactIdentifiers: contactNames.compactMap { resolvedContactIdentifiers[$0] },
-                endedAt: endTime
+                endedAt: endTime,
+                includeHealthData: includeHealthData
             )
             dismiss()
         } catch {

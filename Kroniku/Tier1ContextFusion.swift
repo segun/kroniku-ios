@@ -566,7 +566,7 @@ final class Tier1ContextController: ObservableObject {
         }
     }
 
-    func buildEnrichment(for occurredAt: Date) async -> ContextEnrichment {
+    func buildEnrichment(for occurredAt: Date, includeHealthData: Bool = false) async -> ContextEnrichment {
         // Keep permission state in sync with the OS right before a capture attempt.
         refreshPermissions()
 
@@ -611,7 +611,7 @@ final class Tier1ContextController: ObservableObject {
         }
 
         let healthSummary: HealthSummary?
-        if consent.healthConsent.isEnabled && healthPermission == .authorized {
+        if includeHealthData && consent.healthConsent.isEnabled && healthPermission == .authorized {
             healthSummary = await healthProvider.summary(for: occurredAt, metrics: consent.healthConsent.enabledMetrics)
         } else {
             healthSummary = nil

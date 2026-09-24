@@ -23,7 +23,7 @@ enum MemoryRepositoryError: LocalizedError, Equatable {
 /// A small repository wrapper around a SwiftData ModelContext.
 protocol MemoryRepositoryProtocol {
     func fetchAll() -> [MemoryEvent]
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID], contactNames: [String], resolvedContactIdentifiers: [String], endedAt: Date?) throws
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String, contextEnrichment: ContextEnrichment?, photoAttachments: [PhotoAttachment], resolvedContactIdentifier: String?, extractionReview: Tier2ExtractionReview?, bluetoothContext: BluetoothContextKind?, confidenceScore: Double?, linkedEventIDs: [UUID], contactNames: [String], resolvedContactIdentifiers: [String], endedAt: Date?, includeHealthData: Bool) throws
     @discardableResult
     func addDerivedEvent(source: String, title: String, detail: String?, occurredAt: Date, endedAt: Date?, motion: MotionState?, place: VisitSnapshot?, confidenceScore: Double?) throws -> MemoryEvent
     func reconcileDerivedEvents(_ drafts: [DerivedEventDraft], in interval: DateInterval) throws
@@ -59,7 +59,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
     }
 
-    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = [], contactNames: [String] = [], resolvedContactIdentifiers: [String] = [], endedAt: Date? = nil) throws {
+    func addContactMoment(personName: String?, interactionType: String, occurredAt: Date, note: String, captureMethod: String = "typed", contextEnrichment: ContextEnrichment? = nil, photoAttachments: [PhotoAttachment] = [], resolvedContactIdentifier: String? = nil, extractionReview: Tier2ExtractionReview? = nil, bluetoothContext: BluetoothContextKind? = nil, confidenceScore: Double? = nil, linkedEventIDs: [UUID] = [], contactNames: [String] = [], resolvedContactIdentifiers: [String] = [], endedAt: Date? = nil, includeHealthData: Bool = false) throws {
         let trimmedPersonName = personName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedContactNames = contactNames.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -97,6 +97,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         if let endedAt {
             metadata.append(.init(key: "endedAt", value: ISO8601DateFormatter().string(from: endedAt)))
         }
+        metadata.append(.init(key: "includeHealthData", value: String(includeHealthData)))
 
         let contextCard = ContextCard(
             source: "contactMoment",
@@ -121,6 +122,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
 
         me.linkedEventIDs = linkedEventIDs
         me.confidenceScore = confidenceScore
+        me.includeHealthData = includeHealthData
 
         apply(enrichment: contextEnrichment, to: me)
 
@@ -238,12 +240,14 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         let newMotion = draft.motion?.rawValue
         let oldBluetooth = event.contextCard?.metadata.first(where: { $0.key == "bluetoothContext" })?.value
         let newBluetooth = draft.bluetoothContext?.rawValue
+        let oldMedia = event.contextCard?.metadata.first(where: { $0.key == "mediaNowPlaying" })?.value
+        let newMedia = draft.mediaNowPlaying?.displayText
         let placeChanged = event.place?.name != draft.place?.name ||
             event.place?.latitude != draft.place?.coordinate.latitude ||
             event.place?.longitude != draft.place?.coordinate.longitude
         let changed = event.occurredAt != draft.occurredAt || event.derivedEndedAt != draft.endedAt ||
             event.detail != draft.detail || oldMotion != newMotion || oldBluetooth != newBluetooth || placeChanged ||
-            event.confidenceScore != draft.confidenceScore || event.distanceMeters != draft.distanceMeters
+            event.confidenceScore != draft.confidenceScore || event.distanceMeters != draft.distanceMeters || oldMedia != newMedia
         guard changed else { return false }
 
         event.occurredAt = draft.occurredAt
@@ -254,6 +258,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         let healthSummary = event.healthSummary
         event.contextCard = derivedContextCard(for: draft, preserving: userMetadata)
         event.healthSummary = healthSummary
+        event.includeHealthData = draft.source == "workout" || draft.source == "sleep"
         event.distanceMeters = draft.distanceMeters
         event.workoutRoute = draft.route
         event.symbolName = derivedSymbol(for: draft)
@@ -280,6 +285,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             confidenceScore: draft.confidenceScore,
             derivedEndedAt: draft.endedAt
         )
+        event.includeHealthData = draft.source == "workout" || draft.source == "sleep"
         event.healthSummary = prior?.healthSummary
         event.distanceMeters = draft.distanceMeters
         event.workoutRoute = draft.route
@@ -301,6 +307,9 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
         }
         if let bluetoothContext = draft.bluetoothContext {
             metadata.append(.init(key: "bluetoothContext", value: bluetoothContext.rawValue))
+        }
+        if let media = draft.mediaNowPlaying {
+            metadata.append(.init(key: "mediaNowPlaying", value: media.displayText))
         }
         metadata.append(contentsOf: userMetadata)
         return ContextCard(source: draft.source, category: "derived", summary: draft.detail ?? draft.title, metadata: metadata)
@@ -667,6 +676,7 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
                 }
             )
         }
+        event.includeHealthData = contextData.includeHealthData ?? (event.source == "workout" || event.source == "sleep")
         event.distanceMeters = contextData.distanceMeters
         event.workoutRoute = contextData.workoutRoute.map { route in
             WorkoutRoute(coordinates: route.coordinates.map { GeoCoordinate(latitude: $0.latitude, longitude: $0.longitude) })
@@ -677,12 +687,18 @@ final class SwiftDataMemoryRepository: MemoryRepositoryProtocol {
             category: "moment",
             summary: event.title ?? ""
         )
-        card.metadata.removeAll { $0.key == "motion" || $0.key == "bluetoothContext" || $0.key == "timeSemantics" || $0.key == "contacts" || $0.key == "userNote" || $0.key == "endedAt" }
+        card.metadata.removeAll { $0.key == "motion" || $0.key == "bluetoothContext" || $0.key == "mediaNowPlaying" || $0.key == "timeSemantics" || $0.key == "contacts" || $0.key == "userNote" || $0.key == "endedAt" || $0.key == "includeHealthData" }
+        if let includeHealthData = contextData.includeHealthData {
+            card.metadata.append(.init(key: "includeHealthData", value: String(includeHealthData)))
+        }
         if let motion = contextData.motion {
             card.metadata.append(.init(key: "motion", value: motion))
         }
         if let bluetoothContext = contextData.bluetoothContext {
             card.metadata.append(.init(key: "bluetoothContext", value: bluetoothContext))
+        }
+        if let media = contextData.mediaNowPlaying {
+            card.metadata.append(.init(key: "mediaNowPlaying", value: MediaNowPlaying(title: media.title, artist: media.artist, albumTitle: media.albumTitle, source: media.source).displayText))
         }
         if let timeSemantics = contextData.timeSemantics, !timeSemantics.isEmpty {
             card.metadata.append(.init(key: "timeSemantics", value: timeSemantics.joined(separator: ",")))
@@ -904,10 +920,14 @@ private extension MemoryEvent {
                 : metadataByKey["contacts"]?.split(separator: ",").map(String.init),
             userNote: metadataByKey["userNote"],
             endedAt: contactMoment?.endedAt ?? derivedEndedAt,
+            includeHealthData: includeHealthData,
             healthSummary: healthSummary?.entries.map { SyncHealthEntryData(metric: $0.metric.rawValue, value: $0.value) },
             distanceMeters: distanceMeters,
             workoutRoute: workoutRoute.map { route in
                 SyncWorkoutRouteData(coordinates: route.coordinates.map { SyncGeoCoordinateData(latitude: $0.latitude, longitude: $0.longitude) })
+            },
+            mediaNowPlaying: metadataByKey["mediaNowPlaying"].map {
+                SyncMediaNowPlayingData(title: $0, artist: nil, albumTitle: nil, source: nil)
             },
             externalSourceID: externalSourceID
         )

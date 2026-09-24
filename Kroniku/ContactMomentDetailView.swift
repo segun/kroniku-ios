@@ -32,6 +32,7 @@ struct ContactMomentDetailView: View {
     @State private var occurredAt: Date = Date()
     @State private var endedAt: Date?
     @State private var hasEndTime = false
+    @State private var includeHealthData = false
     // Kept mounted at all times so the DatePicker is never destroyed/recreated, which crashes on some iOS versions.
     @State private var endTimeDraft = Date()
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -144,10 +145,12 @@ struct ContactMomentDetailView: View {
             _endedAt = State(initialValue: cm.endedAt)
             _hasEndTime = State(initialValue: cm.endedAt != nil)
             _endTimeDraft = State(initialValue: cm.endedAt ?? cm.occurredAt)
+            _includeHealthData = State(initialValue: event.includeHealthData)
         } else if event.source == "contactMoment" {
             _contactNames = State(initialValue: [event.detail].compactMap { $0 }.filter { !$0.isEmpty })
             _note = State(initialValue: event.title ?? "")
             _occurredAt = State(initialValue: event.occurredAt ?? Date())
+            _includeHealthData = State(initialValue: event.includeHealthData)
         } else {
             let metadata = Dictionary(
                 (event.contextCard?.metadata ?? []).map { ($0.key, $0.value) },
@@ -159,6 +162,7 @@ struct ContactMomentDetailView: View {
             _endedAt = State(initialValue: event.derivedEndedAt)
             _hasEndTime = State(initialValue: event.derivedEndedAt != nil)
             _endTimeDraft = State(initialValue: event.derivedEndedAt ?? event.occurredAt ?? Date())
+            _includeHealthData = State(initialValue: event.includeHealthData)
         }
         _weatherCondition = State(initialValue: event.weatherSnapshot?.condition ?? "")
         _weatherTemperature = State(initialValue: event.weatherSnapshot?.temperatureC.map { String(format: "%.1f", $0) } ?? "")
@@ -437,6 +441,10 @@ struct ContactMomentDetailView: View {
                 detailRow(title: systemEventDetailLabel, value: detail)
             }
 
+            if let media = event.contextCard?.metadata.first(where: { $0.key == "mediaNowPlaying" })?.value {
+                detailRow(title: "Now playing", value: media)
+            }
+
             if !contactNames.isEmpty {
                 detailRow(title: "People", value: contactNames.joined(separator: ", "))
             }
@@ -613,6 +621,12 @@ struct ContactMomentDetailView: View {
                             .foregroundStyle(.red)
                     }
                 }
+            }
+
+            if isContactMoment {
+                Toggle("Include health data", isOn: $includeHealthData)
+                    .font(.subheadline)
+                    .tint(KronikuPalette.ink)
             }
 
             fieldBlock(title: "Contacts") {
@@ -1033,7 +1047,7 @@ struct ContactMomentDetailView: View {
             event.title = note
             event.detail = contactNames.isEmpty ? nil : contactNames.joined(separator: ", ")
             event.context = searchText
-            let preservedMetadata = detailMetadata
+            let preservedMetadata = detailMetadata.filter { $0.key != "includeHealthData" }
             event.contextCard = ContextCard(
                 source: "contactMoment",
                 category: "moment",
@@ -1041,9 +1055,11 @@ struct ContactMomentDetailView: View {
                 metadata: [
                     .init(key: "interactionType", value: cm.interactionType),
                     .init(key: "captureMethod", value: cm.captureMethod)
-                ] + contactsMetadata + preservedMetadata
+                ] + contactsMetadata + [.init(key: "includeHealthData", value: String(includeHealthData))] + preservedMetadata
             )
             event.symbolName = interaction.symbol
+            event.includeHealthData = includeHealthData
+            event.healthSummary = includeHealthData ? event.healthSummary : nil
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
             event.updatedAt = Date()
             event.backendVersion = max(1, event.backendVersion + 1)
@@ -1076,6 +1092,7 @@ struct ContactMomentDetailView: View {
             event.contextCard = card
             event.context = ([event.title, trimmedNote] + contactNames).compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
             event.photoAttachments = contextController.consent.photoAttachmentEnabled ? photoAttachments : []
+            event.includeHealthData = event.source == "workout" || event.source == "sleep"
             applyEditedWeather()
             event.updatedAt = Date()
             event.backendVersion = max(1, event.backendVersion + 1)
